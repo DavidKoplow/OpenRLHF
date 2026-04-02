@@ -150,7 +150,6 @@ class LLMRayActor:
         # Iterating here makes the engine start immediately, without blocking the driver thread.
         return [out async for out in self.llm.generate(prompts, sampling_params, request_id=random_uuid())]
 
-
     async def generate(self, prompt_token_ids, sampling_params):
         """Token-level generation for rollout executors."""
         generator = self.llm.generate(
@@ -192,7 +191,6 @@ class LLMRayActor:
         ]
         return await asyncio.gather(*tasks)
 
-
     async def generate_responses_batch(
         self,
         prompts: List[str],
@@ -203,10 +201,10 @@ class LLMRayActor:
         num_samples: int = 1,
     ):
         """Generate samples for multiple prompts concurrently.
-        
+
         Submits all prompts to vLLM's AsyncLLMEngine at once via asyncio.gather,
         allowing vLLM's continuous batching to process them efficiently.
-        
+
         Args:
             prompts: List of prompt strings
             labels: List of label strings (same length as prompts)
@@ -214,7 +212,7 @@ class LLMRayActor:
             max_length: Maximum sequence length
             hf_tokenizer: HuggingFace tokenizer
             num_samples: Number of samples per prompt
-            
+
         Returns:
             List of results, with num_samples results per prompt
         """

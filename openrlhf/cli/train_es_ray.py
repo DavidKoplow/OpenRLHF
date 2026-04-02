@@ -12,8 +12,8 @@ from datetime import datetime
 import ray
 import torch
 
-from openrlhf.trainer.ray import create_vllm_engines
 from openrlhf.trainer.es_trainer import ESTrainer
+from openrlhf.trainer.ray import create_vllm_engines
 from openrlhf.utils import get_strategy
 
 
@@ -33,7 +33,7 @@ def train(args):
 
     # Create vLLM engines with ES worker extension
     max_len = args.max_len if args.max_len else args.prompt_max_len + args.generate_max_len
-    
+
     vllm_engines = create_vllm_engines(
         args.vllm_num_engines,
         args.vllm_tensor_parallel_size,
@@ -58,7 +58,7 @@ def train(args):
     critic_model_group = None
     reward_model_group = None  # ES uses rewards from agent or response directly
     reference_model_group = None
-    
+
     # Create a dummy optimizer (ES optimization happens in vLLM workers)
     # This is just to satisfy the interface
     dummy_params = [torch.nn.Parameter(torch.zeros(1))]
@@ -154,7 +154,9 @@ if __name__ == "__main__":
 
     # ==================== Training arguments ====================
     parser.add_argument("--num_episodes", type=int, default=1)
-    parser.add_argument("--rollout_batch_size", type=int, default=64, help="Prompts per seed (total = this * population_size)")
+    parser.add_argument(
+        "--rollout_batch_size", type=int, default=64, help="Prompts per seed (total = this * population_size)"
+    )
     parser.add_argument("--prompt_max_len", type=int, default=1024)
     parser.add_argument("--generate_max_len", type=int, default=1024)
     parser.add_argument("--max_len", type=int, default=None)
@@ -208,6 +210,7 @@ if __name__ == "__main__":
 
     # Set ES optimizer params as environment variables (read by ESWorkerWrap)
     import os
+
     optimizer_params = args.es_optimizer_params.strip()
     try:
         json.loads(optimizer_params)
@@ -218,18 +221,14 @@ if __name__ == "__main__":
             try:
                 json.loads(maybe_fixed)
             except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Invalid --es_optimizer_params JSON: {optimizer_params}"
-                ) from exc
+                raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params}") from exc
             print(
                 "[Warning] Fixed invalid --es_optimizer_params by stripping a "
                 "trailing '}'. Consider fixing the source config."
             )
             optimizer_params = maybe_fixed
         else:
-            raise ValueError(
-                f"Invalid --es_optimizer_params JSON: {optimizer_params}"
-            )
+            raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params}")
     os.environ["ES_OPTIMIZER"] = args.es_optimizer
     os.environ["ES_OPTIMIZER_PARAMS"] = optimizer_params
     os.environ["ES_CLIP_GRAD_NORM"] = str(args.es_clip_grad_norm)

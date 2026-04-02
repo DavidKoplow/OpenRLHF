@@ -1,29 +1,29 @@
-import os
-import time
-import random
-import ray
-import torch
 import asyncio
-import numpy as np
+import os
+import random
+import time
+from abc import ABC
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import ray
+import torch
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-import heapq
-from abc import ABC
 from vllm import SamplingParams
 
 from openrlhf.datasets import PromptDataset
 from openrlhf.datasets.utils import blending_datasets
-from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 from openrlhf.trainer.ray.launcher import RayActorGroup
-from openrlhf.utils.logging_utils import init_logger, WandbLogger, TensorboardLogger
-from openrlhf.utils.utils import get_tokenizer
-from openrlhf.utils.distributed_sampler import DistributedSampler
-from torch.optim import Optimizer
-from torch.utils.data import DataLoader
+from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 from openrlhf.utils.deepspeed import DeepspeedStrategy
+from openrlhf.utils.distributed_sampler import DistributedSampler
+from openrlhf.utils.logging_utils import TensorboardLogger, WandbLogger, init_logger
+from openrlhf.utils.utils import get_tokenizer
 
 logger = init_logger(__name__)
 
@@ -34,12 +34,13 @@ STABILIZE_SEED = -1
 # ESExperience Dataclass
 # =============================================================================
 
+
 @dataclass
 class ESExperience:
     """Experience dataclass for ES training.
-    
+
     Simplified compared to PPO Experience - only contains fields needed for ES.
-    
+
     Shapes:
         sequences: (B, S) token sequences
         attention_mask: (B, S) attention mask
@@ -50,6 +51,7 @@ class ESExperience:
         seeds: (B,) mutation seed for each sample
         rewards: (B,) rewards for each sample
     """
+
     sequences: torch.Tensor = None
     attention_mask: torch.LongTensor = None
     action_mask: torch.BoolTensor = None
@@ -59,8 +61,11 @@ class ESExperience:
     prompts: List[str] = None
     labels: List[str] = None
 
+
 async def ray_get(x):
     return await asyncio.to_thread(ray.get, x)
+
+
 async def run_one_seed(
     seed_idx: int,
     seed: int,
@@ -111,6 +116,8 @@ async def run_one_seed(
         reward_jobs.append((round_exps, refs))  # (list_of_exps, list_of_refs) per seed
 
     return round_exps, batch_exhausted, len(prompts), reward_jobs
+
+
 async def run_all_seeds(engine_seeds, vllm_engines, **kwargs):
     engine_pool = asyncio.Queue()
     for e in vllm_engines:
@@ -140,7 +147,7 @@ async def run_all_seeds(engine_seeds, vllm_engines, **kwargs):
         round_exps, batch_exhausted, consumed, reward_jobs = await t
         all_experiences.extend(round_exps)
         all_reward_jobs.extend(reward_jobs)
-        exhausted |= (batch_exhausted and not kwargs["shared_batch"])
+        exhausted |= batch_exhausted and not kwargs["shared_batch"]
         prompts_consumed += consumed
 
     if all_reward_jobs:
@@ -154,17 +161,19 @@ async def run_all_seeds(engine_seeds, vllm_engines, **kwargs):
 
     return all_experiences, exhausted, prompts_consumed
 
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
 
+
 def _collect_prompt_batch(dataloader_iter, num_prompts: int):
     """Draw up to `num_prompts` items from the prompt dataloader.
-    
+
     Args:
         dataloader_iter: Iterator over the dataloader
         num_prompts: Maximum number of prompts to collect
-        
+
     Returns:
         Tuple of (prompts, labels, exhausted)
     """
@@ -186,13 +195,13 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
 
 def prepare_datasets(strategy, tokenizer):
     """Prepare datasets for ES training.
-    
+
     ES-specific version that doesn't require prompt_data_probs.
-    
+
     Args:
         strategy: Training strategy with args
         tokenizer: HuggingFace tokenizer
-        
+
     Returns:
         Tuple of (prompts_dataloader, eval_dataloader, max_steps)
     """
@@ -232,10 +241,15 @@ def prepare_datasets(strategy, tokenizer):
         eval_dataloader = None
 
     # Calculate max steps for ES training
-    n_samples_per_prompt = getattr(args, 'n_samples_per_prompt', 1)
-    max_epochs = getattr(args, 'max_epochs', 1)
+    n_samples_per_prompt = getattr(args, "n_samples_per_prompt", 1)
+    max_epochs = getattr(args, "max_epochs", 1)
     max_steps = (
-        len(prompts_dataset) * n_samples_per_prompt // args.rollout_batch_size * args.population_size * args.num_episodes * max_epochs
+        len(prompts_dataset)
+        * n_samples_per_prompt
+        // args.rollout_batch_size
+        * args.population_size
+        * args.num_episodes
+        * max_epochs
     )
     return prompts_dataloader, eval_dataloader, max_steps
 
@@ -244,9 +258,10 @@ def prepare_datasets(strategy, tokenizer):
 # ESSamplesGenerator Class
 # =============================================================================
 
+
 class ESSamplesGenerator:
     """ES-specific sample generator with staged mutation and async reward computation.
-    
+
     Key features:
     - Multi-round seed processing (handles seeds >> num_engines)
     - Configurable batch sharing (same vs unique data per seed)
@@ -263,7 +278,7 @@ class ESSamplesGenerator:
         reward_model_group: Optional[RayActorGroup] = None,
     ):
         """Initialize ES samples generator.
-        
+
         Args:
             strategy: Training strategy with args
             prompts_dataloader: DataLoader for training prompts
@@ -279,7 +294,7 @@ class ESSamplesGenerator:
         self.prompts_dataloader = prompts_dataloader
         self.eval_dataloader = eval_dataloader
         self.reward_model_group = reward_model_group
-        
+
         # Internal state
         self._dataloader_iter = None
         self._eval_dataloader_iter = None
@@ -295,28 +310,28 @@ class ESSamplesGenerator:
         **generate_kwargs,
     ) -> Tuple[List[ESExperience], Optional[float], int, bool]:
         """Generate samples with ES mutations across multiple rounds.
-        
+
         Args:
             engine_seeds: List of mutation seeds (can be >> num_engines)
             es_std: Standard deviation for ES perturbations
-            shared_batch: If True, all seeds evaluate same prompts; 
+            shared_batch: If True, all seeds evaluate same prompts;
                          if False, each seed gets unique prompts via DistributedSampler
             **generate_kwargs: Generation parameters (temperature, max_new_tokens, etc.)
-            
+
         Returns:
             Tuple of (experiences, filter_pass_rate, prompts_consumed, exhausted)
         """
         if self._dataloader_iter is None:
             self._dataloader_iter = iter(self.prompts_dataloader)
-        
+
         # Wake sleeping vLLM engines before dispatching
         if self.args.vllm_enable_sleep:
             batch_vllm_engine_call(self.vllm_engines, "wake_up")
-        
+
         # Clear cached batch at start of step
         self._cached_prompts = None
         self._cached_labels = None
-        
+
         all_experiences, exhausted, prompts_consumed = asyncio.run(
             run_all_seeds(
                 engine_seeds,
@@ -334,7 +349,6 @@ class ESSamplesGenerator:
         filter_pass_rate = None
         return all_experiences, None, prompts_consumed, exhausted
 
-        
     def _get_prompts_for_seed(
         self,
         seed_idx: int,
@@ -343,13 +357,13 @@ class ESSamplesGenerator:
         shared_batch: bool,
     ) -> Tuple[List[str], List[str], bool]:
         """Get prompts for a specific seed.
-        
+
         Args:
             seed_idx: Index of current seed in engine_seeds list
             num_seeds: Total number of seeds being processed
             num_prompts: Number of prompts to fetch
             shared_batch: If True, all seeds get same prompts; if False, each gets unique slice
-            
+
         Returns:
             Tuple of (prompts, labels, exhausted)
         """
@@ -360,7 +374,7 @@ class ESSamplesGenerator:
                     self._dataloader_iter, num_prompts
                 )
                 self._cached_exhausted = exhausted
-            return self._cached_prompts, self._cached_labels, getattr(self, '_cached_exhausted', False)
+            return self._cached_prompts, self._cached_labels, getattr(self, "_cached_exhausted", False)
         else:
             # Each seed gets unique prompts via DistributedSampler
             # Use seed_idx as "rank" to partition data across seeds
@@ -372,16 +386,16 @@ class ESSamplesGenerator:
                 seed=self.args.seed,
                 shuffle=True,
             )
-            
+
             # Create a temporary dataloader with this sampler
             temp_loader = DataLoader(
                 dataset,
                 batch_size=self.prompts_dataloader.batch_size,
                 sampler=sampler,
                 num_workers=0,
-                collate_fn=getattr(self.prompts_dataloader, 'collate_fn', None),
+                collate_fn=getattr(self.prompts_dataloader, "collate_fn", None),
             )
-            
+
             # Collect prompts
             prompts, labels = [], []
             exhausted = False
@@ -391,16 +405,16 @@ class ESSamplesGenerator:
                 else:
                     batch_prompts = batch[0] if len(batch) > 0 else []
                     batch_labels = batch[1] if len(batch) > 1 else []
-                
+
                 remaining = num_prompts - len(prompts)
                 if remaining <= 0:
                     break
                 prompts.extend(batch_prompts[:remaining])
                 labels.extend(batch_labels[:remaining])
-            
+
             if len(prompts) < num_prompts:
                 exhausted = True
-                
+
             return prompts, labels, exhausted
 
     def _dispatch_and_collect(
@@ -410,15 +424,15 @@ class ESSamplesGenerator:
         **generate_kwargs,
     ) -> List[ESExperience]:
         """Dispatch prompts to engines and collect responses.
-        
+
         Uses batch generation to submit all prompts to vLLM concurrently,
         allowing vLLM's continuous batching to process them efficiently.
-        
+
         Args:
             prompts_per_engine: List of (prompts, labels, seed) tuples per engine
             engines: List of vLLM engine actors to use
             **generate_kwargs: Generation parameters
-            
+
         Returns:
             List of ESExperience objects
         """
@@ -431,11 +445,10 @@ class ESSamplesGenerator:
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
             logprobs=None,
             stop=[generate_kwargs.get("stop_token", "</answer>")],
-
         )
         truncate_length = generate_kwargs.get("prompt_max_len", 1024) + generate_kwargs.get("max_new_tokens", 1024)
-        n_samples = self.args.n_samples_per_prompt if hasattr(self.args, 'n_samples_per_prompt') else 1
-        
+        n_samples = self.args.n_samples_per_prompt if hasattr(self.args, "n_samples_per_prompt") else 1
+
         # Dispatch all prompts to their assigned engines using batch generation
         # Each engine receives all its prompts in a single Ray call
         all_refs = []  # (ref, seed, prompts, labels)
@@ -453,35 +466,33 @@ class ESSamplesGenerator:
             )
             all_refs.append((ref, seed, prompts, labels))
             total_samples += len(prompts) * max(int(n_samples), 1)
-        
+
         # Collect all responses
         experiences = []
         pbar = tqdm(total=total_samples, desc="Generate samples")
-        
+
         pending = list(all_refs)
         while pending:
             # Wait for any result
             refs_only = [r[0] for r in pending]
             ready_refs, _ = ray.wait(refs_only, num_returns=1, timeout=10.0)
-            
+
             for ready_ref in ready_refs:
                 # Find the matching entry
                 for i, (ref, seed, prompts, labels) in enumerate(pending):
                     if ref == ready_ref:
                         # Get batch of responses
                         batch_responses = ray.get(ready_ref)
-                        
+
                         # Process all responses from this batch
                         for response in batch_responses:
-                            exp = self._process_response_into_experience(
-                                response, seed, truncate_length
-                            )
+                            exp = self._process_response_into_experience(response, seed, truncate_length)
                             experiences.append(exp)
-                        
+
                         pending.pop(i)
                         pbar.update(len(batch_responses))
                         break
-        
+
         pbar.close()
         return experiences
 
@@ -492,12 +503,12 @@ class ESSamplesGenerator:
         truncate_length: int,
     ) -> ESExperience:
         """Turn a single vLLM response into an ESExperience.
-        
+
         Args:
             response: Response dict from vLLM engine
             seed: Mutation seed used for this generation
             truncate_length: Max sequence length
-            
+
         Returns:
             ESExperience object
         """
@@ -505,14 +516,14 @@ class ESSamplesGenerator:
         tokenized_observation = response["observation_tokens"].copy()
         tokenized_ranges = response["action_ranges"]
         reward_val = response.get("reward", None)
-        
+
         # Handle tensor values from reward functions (extract scalar)
         if isinstance(reward_val, torch.Tensor):
             reward_val = reward_val.mean().item()
 
         sequences = torch.tensor(tokenized_observation, dtype=torch.long)
         attention_mask = torch.tensor([1] * len(tokenized_observation))
-        
+
         # Mark the action span within the concatenated tokens
         action_mask = torch.zeros_like(attention_mask)
         for start, end in tokenized_ranges:
@@ -543,46 +554,41 @@ class ESSamplesGenerator:
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[ESExperience]:
         """Generate evaluation samples without mutations (base model).
-        
+
         Args:
             **generate_kwargs: Generation parameters
-            
+
         Returns:
             List of ESExperience objects
         """
         if self._eval_dataloader_iter is None:
             self._eval_dataloader_iter = iter(self.eval_dataloader)
-        
+
         # Wake sleeping vLLM engines before dispatching
         if self.args.vllm_enable_sleep:
             batch_vllm_engine_call(self.vllm_engines, "wake_up")
-        
+
         # Revert any mutations on engines (use seed=None, std=0)
         revert_refs = [engine.model_mutate.remote(None, 0.0) for engine in self.vllm_engines]
         ray.get(revert_refs)
-        
+
         # Collect all eval prompts
-        prompts, labels, _ = _collect_prompt_batch(
-            self._eval_dataloader_iter, 
-            len(self.eval_dataloader.dataset)
-        )
-        
+        prompts, labels, _ = _collect_prompt_batch(self._eval_dataloader_iter, len(self.eval_dataloader.dataset))
+
         # Create dummy seed=0 for eval (no mutation)
         prompts_per_engine = []
         num_engines = len(self.vllm_engines)
         prompts_per_eng = len(prompts) // num_engines + 1
-        
+
         for i in range(num_engines):
             start = i * prompts_per_eng
             end = min(start + prompts_per_eng, len(prompts))
             if start < len(prompts):
                 prompts_per_engine.append((prompts[start:end], labels[start:end], 0))  # seed=0 for eval
-        
+
         # Dispatch and collect
-        experiences = self._dispatch_and_collect(
-            prompts_per_engine, self.vllm_engines, **generate_kwargs
-        )
-        
+        experiences = self._dispatch_and_collect(prompts_per_engine, self.vllm_engines, **generate_kwargs)
+
         # Compute rewards if reward model available
         if self.reward_model_group is not None:
             for exp in experiences:
@@ -595,17 +601,14 @@ class ESSamplesGenerator:
                 rewards_results = ray.get(reward_refs)
                 if rewards_results:
                     exp.rewards = rewards_results[0][0] if isinstance(rewards_results[0], list) else rewards_results[0]
-        
+
         # Put engines back to sleep when enabled
         if self.args.vllm_enable_sleep:
             batch_vllm_engine_call(self.vllm_engines, "sleep")
-        
+
         self._eval_dataloader_iter = None
-        
+
         return experiences
-
-
-
 
 
 class BaseTrainer(ABC):
@@ -629,7 +632,6 @@ class BaseTrainer(ABC):
 
     def fit(self):
         raise NotImplementedError("fit method is not implemented")
-
 
     def broadcast_to_vllm(self) -> None:
         """Broadcast actor weights to vLLM engines.
@@ -686,15 +688,18 @@ class BaseTrainer(ABC):
             "total_consumed_prompts": 0,
             "data_loader_state_dict": {},
         }
+
+
 # =============================================================================
 # ESTrainer Class
 # =============================================================================
+
 
 @ray.remote
 class ESTrainer(BaseTrainer):
     """
     Evolutionary Strategies Trainer extending BasePPOTrainer.
-    
+
     Inherits:
         - Logging infrastructure (Wandb/Tensorboard)
         - Checkpointing logic
@@ -722,13 +727,11 @@ class ESTrainer(BaseTrainer):
 
         self.optim = optim
 
-        tokenizer = get_tokenizer(
-            pretrain, None, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer
-        )
-        
+        tokenizer = get_tokenizer(pretrain, None, "left", strategy, use_fast=not strategy.args.disable_fast_tokenizer)
+
         # Prepare datasets (Using the helper function defined in your snippet)
         self.prompts_dataloader, self.eval_dataloader, self.max_steps = prepare_datasets(strategy, tokenizer)
-        
+
         # 2. Initialize Base Class
         super().__init__(
             strategy,
@@ -736,7 +739,7 @@ class ESTrainer(BaseTrainer):
             vllm_engines,
             tokenizer,
         )
-        
+
         # Store the additional model groups that ESTrainer needs
         self.actor_model_group = actor_model_group
         self.critic_model_group = critic_model_group
@@ -765,11 +768,11 @@ class ESTrainer(BaseTrainer):
         Override fit to handle the specific ES training loop while leveraging
         BasePPOTrainer's helper methods.
         """
-        # Restore states (checkpointing logic reused from BasePPOTrainer utils if available, 
+        # Restore states (checkpointing logic reused from BasePPOTrainer utils if available,
         # or we use the custom init below)
         checkpoint_states = self.init_checkpoint_states()
         global_step = checkpoint_states["global_step"]
-        
+
         # Sync VLLM with Actor weights at start
         if global_step > 0:
             self.broadcast_to_vllm()
@@ -783,13 +786,13 @@ class ESTrainer(BaseTrainer):
 
         # Infinite loop over episodes (standard OpenRLHF pattern)
         for episode in range(checkpoint_states["episode"], self.args.num_episodes):
-            
+
             # Use the sample generator's internal handling or manual tqdm
             while True:
                 # --- The Core ES Step ---
-                # We do not use self.experience_maker here because ES 
+                # We do not use self.experience_maker here because ES
                 # injects noise *before* generation, not after.
-                
+
                 status, global_step, is_exhausted = self.train_step(global_step)
 
                 # Logging
@@ -804,10 +807,12 @@ class ESTrainer(BaseTrainer):
 
                 if is_exhausted:
                     break
-        
+
         # Cleanup
-        if self.wandb_logger: self.wandb_logger.close()
-        if self.tensorboard_logger: self.tensorboard_logger.close()
+        if self.wandb_logger:
+            self.wandb_logger.close()
+        if self.tensorboard_logger:
+            self.tensorboard_logger.close()
 
     def train_step(self, global_step: int) -> Tuple[Dict, int, bool]:
         """
@@ -815,7 +820,7 @@ class ESTrainer(BaseTrainer):
         Returns: (status_dict, next_global_step, is_dataset_exhausted)
         """
         start_time = time.time()
-        
+
         # 1. Generate Seeds for the Population
         # We assign specific random seeds to specific VLLM engines to create perturbations
         seeds = [self._rng.randint(0, 2**31 - 1) for _ in range(self.population_size)]
@@ -843,13 +848,13 @@ class ESTrainer(BaseTrainer):
             # Get seeds and rewards from the ESExperience tensors
             sample_seeds = sample.seeds.tolist() if sample.seeds is not None else []
             sample_rewards = sample.rewards.tolist() if sample.rewards is not None else []
-            
+
             # Handle case where rewards might be scalar
             if not isinstance(sample_rewards, list):
                 sample_rewards = [sample_rewards]
             if not isinstance(sample_seeds, list):
                 sample_seeds = [sample_seeds]
-            
+
             for seed_val, reward_val in zip(sample_seeds, sample_rewards):
                 seed_scores[seed_val].append(reward_val)
                 total_reward += reward_val
@@ -858,11 +863,9 @@ class ESTrainer(BaseTrainer):
         updates = self._normalize_seed_scores(seed_scores)
 
         # 5. Apply ES gradient to all engines
-        update_refs = [
-            engine.apply_es_gradient.remote(updates) for engine in self.vllm_engines
-        ]
+        update_refs = [engine.apply_es_gradient.remote(updates) for engine in self.vllm_engines]
         ray.get(update_refs)
-        
+
         # Optionally: Sync back to Actor Group if you maintain a master copy there
         # ray.get(self.actor_model_group.async_run_method("step_from_remote_params", ...))
 
@@ -881,17 +884,18 @@ class ESTrainer(BaseTrainer):
         """Helper to normalize scores for ES update."""
         if not seed_scores:
             return []
-            
+
         seed_means = {seed: np.mean(scores) for seed, scores in seed_scores.items()}
         scores_tensor = torch.tensor(list(seed_means.values()), dtype=torch.float32)
-        
+
         # Standardize
         mean = scores_tensor.mean()
         std = scores_tensor.std()
-        if std < 1e-8: std = 1.0
-        
+        if std < 1e-8:
+            std = 1.0
+
         normalized = (scores_tensor - mean) / std
-        
+
         updates = []
         for (seed, _), norm_score in zip(seed_means.items(), normalized.tolist()):
             updates.append((seed, norm_score, self.es_std))
@@ -929,7 +933,7 @@ class ESTrainer(BaseTrainer):
                     rewards_list.extend(sample.rewards.tolist())
                 else:
                     rewards_list.append(sample.rewards)
-        
+
         if not rewards_list:
             logger.warning("No rewards collected during evaluation")
             return
@@ -952,10 +956,10 @@ class ESTrainer(BaseTrainer):
             prompt_idx = i * n_samples_per_prompt if n_samples_per_prompt > 1 else i
             if prompt_idx >= len(all_prompts):
                 break
-                
+
             original_prompt = all_prompts[prompt_idx]
             datasource = prompt_to_datasource.get(original_prompt, "unknown")
-            
+
             if datasource not in global_metrics:
                 global_metrics[datasource] = {f"pass{n_samples_per_prompt}": 0, "pass1": 0, "count": 0}
 
