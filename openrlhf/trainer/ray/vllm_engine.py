@@ -145,6 +145,12 @@ class LLMRayActor:
         for tag in tags:
             await self.llm.wake_up(tags=[tag])
 
+    async def llm_generate_batch(self, prompts, sampling_params):
+        # AsyncLLMEngine.generate returns an async iterator; nothing runs until iterated.
+        # Iterating here makes the engine start immediately, without blocking the driver thread.
+        return [out async for out in self.llm.generate(prompts, sampling_params, request_id=random_uuid())]
+
+
     async def generate(self, prompt_token_ids, sampling_params):
         """Token-level generation for rollout executors."""
         generator = self.llm.generate(
@@ -187,6 +193,62 @@ class LLMRayActor:
         return await asyncio.gather(*tasks)
 
 
+    async def generate_responses_batch(
+        self,
+        prompts: List[str],
+        labels: List[str],
+        sampling_params,
+        max_length: int,
+        hf_tokenizer,
+        num_samples: int = 1,
+    ):
+        """Generate samples for multiple prompts concurrently.
+        
+        Submits all prompts to vLLM's AsyncLLMEngine at once via asyncio.gather,
+        allowing vLLM's continuous batching to process them efficiently.
+        
+        Args:
+            prompts: List of prompt strings
+            labels: List of label strings (same length as prompts)
+            sampling_params: vLLM SamplingParams
+            max_length: Maximum sequence length
+            hf_tokenizer: HuggingFace tokenizer
+            num_samples: Number of samples per prompt
+            
+        Returns:
+            List of results, with num_samples results per prompt
+        """
+        tasks = []
+        for prompt, label in zip(prompts, labels):
+            for _ in range(num_samples):
+                tasks.append(
+                    self.executor.execute(
+                        prompt=prompt,
+                        label=label,
+                        sampling_params=sampling_params,
+                        max_length=max_length,
+                        hf_tokenizer=hf_tokenizer,
+                        llm_engine=self,
+                    )
+                )
+        # All tasks submitted concurrently - vLLM will batch them internally
+        results = await asyncio.gather(*tasks)
+        return results
+
+    # ==================== ES (Evolutionary Strategies) Support ====================
+
+    async def model_mutate(self, seed: Optional[int], std: Optional[float]) -> Optional[int]:
+
+        return await self.llm.collective_rpc("model_mutate", args=(seed, std))
+
+    async def apply_es_gradient(self, updates: List) -> bool:
+        return await self.llm.collective_rpc("apply_es_gradient", args=(updates,))
+
+    async def get_mutation_seed(self) -> Optional[int]:
+        """Get current mutation seed from worker."""
+        return await self.llm.collective_rpc("get_mutation_seed", args=())
+
+
 def create_vllm_engines(
     num_engines: int,
     tensor_parallel_size: int,
@@ -202,6 +264,7 @@ def create_vllm_engines(
     logprobs_mode=None,
     agent_func_path: Optional[str] = None,
     remote_rm_url: Optional[str] = None,
+    worker_extension_cls: str = "openrlhf.trainer.ray.vllm_worker_wrap.WorkerWrap",
 ):
     """Spin up a set of vLLM Ray actors with consistent placement."""
     vllm_engines = []
@@ -232,7 +295,7 @@ def create_vllm_engines(
         actor_kwargs = {
             "model": pretrain,
             "enforce_eager": enforce_eager,
-            "worker_extension_cls": "openrlhf.trainer.ray.vllm_worker_wrap.WorkerWrap",
+            "worker_extension_cls": worker_extension_cls,
             "tensor_parallel_size": tensor_parallel_size,
             "seed": seed + i,
             "distributed_executor_backend": distributed_executor_backend,
