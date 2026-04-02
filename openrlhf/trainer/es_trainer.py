@@ -140,7 +140,7 @@ async def run_all_seeds(engine_seeds, vllm_engines, **kwargs):
 
     all_experiences = []
     all_reward_jobs = []
-    exhausted = False
+        exhausted |= batch_exhausted
     prompts_consumed = 0
 
     for t in asyncio.as_completed(tasks):
