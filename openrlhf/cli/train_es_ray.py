@@ -207,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
 
     args = parser.parse_args()
-
+    optimizer_params = args.es_optimizer_params.strip()
     # Set ES optimizer params as environment variables (read by ESWorkerWrap)
     import os
 
