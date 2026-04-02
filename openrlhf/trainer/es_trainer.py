@@ -148,7 +148,7 @@ async def run_all_seeds(engine_seeds, vllm_engines, **kwargs):
         all_experiences.extend(round_exps)
         all_reward_jobs.extend(reward_jobs)
         exhausted |= batch_exhausted and not kwargs["shared_batch"]
-        prompts_consumed += consumed
+                flat_rewards = [item for sublist in rr for item in sublist]
 
     if all_reward_jobs:
         reward_results = await asyncio.gather(*(ray_get(refs) for _, refs in all_reward_jobs))
