@@ -336,10 +336,7 @@ if __name__ == "__main__":
         parser.error("--max_training_steps must be a positive integer")
 
     optimizer_params = args.es_optimizer_params.strip()
-    # Set ES optimizer params as environment variables (read by ESWorkerWrap)
-    import os
 
-    optimizer_params = args.es_optimizer_params.strip()
     try:
         json.loads(optimizer_params)
     except json.JSONDecodeError:

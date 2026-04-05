@@ -235,10 +235,6 @@ def create_app(
 
             return JSONResponse({"rewards": rewards, "scores": rewards, "extra_logs": sanitized_extra_logs})
         except Exception as e:
-            import traceback
-
-            print(f"Error in get_reward: {e}")
-            traceback.print_exc()
             return JSONResponse({"error": str(e), "rewards": [], "scores": [], "extra_logs": {}}, status_code=500)
 
     return app
