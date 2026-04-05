@@ -145,7 +145,6 @@ class LLMRayActor:
         for tag in tags:
             await self.llm.wake_up(tags=[tag])
 
-
     async def generate(self, prompt_token_ids, sampling_params):
         """Token-level generation for rollout executors."""
         generator = self.llm.generate(
