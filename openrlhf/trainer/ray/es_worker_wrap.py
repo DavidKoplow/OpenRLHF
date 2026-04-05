@@ -6,7 +6,6 @@ Extends WorkerWrap with Evolutionary Strategies (ES) capabilities:
 - get_mutation_seed: Return current mutation seed for response tagging
 """
 
-import ast
 import hashlib
 import json
 import os
