@@ -68,6 +68,7 @@ def train(args):
     optim = torch.optim.SGD(dummy_params, lr=_dummy_lr)
 
     # Create ES trainer with all required parameters
+    stop_sequences = [args.stop_token] if args.stop_token else []
     es_trainer = ESTrainer.remote(
         pretrain=args.pretrain,
         strategy=strategy,
@@ -77,11 +78,16 @@ def train(args):
         reference_model_group=reference_model_group,
         vllm_engines=vllm_engines,
         optim=optim,
-        # Generation kwargs passed as **kwargs
+        # Generation kwargs passed as **kwargs (see --stop_token, --skip_special_tokens, sampling args)
         prompt_max_len=args.prompt_max_len,
         max_new_tokens=args.generate_max_len,
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
+        min_new_tokens=args.min_new_tokens,
+        skip_special_tokens=args.skip_special_tokens,
+        stop=stop_sequences,
+        n_samples_per_prompt=args.n_samples_per_prompt,
     )
 
     # Run training
@@ -113,8 +119,6 @@ if __name__ == "__main__":
         help='JSON optimizer kwargs (e.g. {"lr": 0.001}); passed to ES workers. Omitted "lr" defaults to 0.001 for the placeholder optim.',
     )
     parser.add_argument("--es_clip_grad_norm", type=float, default=0.0, help="Gradient clipping norm (0 to disable)")
-    parser.add_argument("--mutate_key", type=str, default="all", help="Only mutate params containing this key")
-    parser.add_argument("--mutate_exclude_key", type=str, default="none", help="Exclude params containing this key")
     parser.add_argument(
         "--auto_scale_lr_model_width",
         action="store_true",
@@ -229,7 +233,21 @@ if __name__ == "__main__":
     parser.add_argument("--max_len", type=int, default=None)
     parser.add_argument("--n_samples_per_prompt", type=int, default=1)
     parser.add_argument("--top_p", type=float, default=1.0)
+    parser.add_argument("--top_k", type=int, default=-1, help="vLLM top_k (-1 disables).")
+    parser.add_argument("--min_new_tokens", type=int, default=1, help="vLLM min_tokens.")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--skip_special_tokens",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Decode completions with skip_special_tokens (vLLM SamplingParams).",
+    )
+    parser.add_argument(
+        "--stop_token",
+        type=str,
+        default="</answer>",
+        help="Single stop string for vLLM (empty string disables stop sequences).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--full_determinism", action="store_true", default=False)
 
@@ -358,8 +376,6 @@ if __name__ == "__main__":
     os.environ["ES_OPTIMIZER"] = args.es_optimizer
     os.environ["ES_OPTIMIZER_PARAMS"] = optimizer_params
     os.environ["ES_CLIP_GRAD_NORM"] = str(args.es_clip_grad_norm)
-    os.environ["MUTATE_KEY"] = args.mutate_key
-    os.environ["MUTATE_EXCLUDE_KEY"] = args.mutate_exclude_key
     os.environ["DROP_CENTER"] = str(args.drop_center)
     if args.auto_scale_lr_model_width:
         os.environ["AUTO_SCALE_LR_MODEL_WIDTH"] = "true"

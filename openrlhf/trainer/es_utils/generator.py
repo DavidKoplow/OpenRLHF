@@ -234,6 +234,10 @@ class ESSamplesGenerator:
         engines: List,
         **generate_kwargs,
     ) -> List[ESExperience]:
+        stop = generate_kwargs.get("stop")
+        if stop is None:
+            token = generate_kwargs.get("stop_token")
+            stop = [] if not token else [token]
         sampling_params = SamplingParams(
             temperature=generate_kwargs.get("temperature", 1.0),
             top_p=generate_kwargs.get("top_p", 1.0),
@@ -242,7 +246,7 @@ class ESSamplesGenerator:
             min_tokens=generate_kwargs.get("min_new_tokens", 1),
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
             logprobs=None,
-            stop=[generate_kwargs.get("stop_token", "</answer>")],
+            stop=stop,
         )
         truncate_length = generate_kwargs.get("prompt_max_len", 1024) + generate_kwargs.get("max_new_tokens", 1024)
         n_samples = self.args.n_samples_per_prompt

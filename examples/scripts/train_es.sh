@@ -53,6 +53,10 @@ if [[ ${1} != "slurm" ]]; then
       --max_eval_samples 200 \
       --max_len 1024 \
       --temperature 0.0 \
+      --top_k -1 \
+      --min_new_tokens 1 \
+      --no-skip_special_tokens \
+      --stop_token "</answer>" \
       --n_samples_per_prompt 1 \
       --max_epochs 1 \
       --save_steps 8 \

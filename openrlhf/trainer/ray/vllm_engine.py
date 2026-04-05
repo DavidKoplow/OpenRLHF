@@ -145,10 +145,6 @@ class LLMRayActor:
         for tag in tags:
             await self.llm.wake_up(tags=[tag])
 
-    async def llm_generate_batch(self, prompts, sampling_params):
-        # AsyncLLMEngine.generate returns an async iterator; nothing runs until iterated.
-        # Iterating here makes the engine start immediately, without blocking the driver thread.
-        return [out async for out in self.llm.generate(prompts, sampling_params, request_id=random_uuid())]
 
     async def generate(self, prompt_token_ids, sampling_params):
         """Token-level generation for rollout executors."""
