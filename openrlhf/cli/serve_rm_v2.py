@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import inspect
 import json
+import logging
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 Values = Dict[str, List[float]]
 
@@ -235,6 +238,7 @@ def create_app(
 
             return JSONResponse({"rewards": rewards, "scores": rewards, "extra_logs": sanitized_extra_logs})
         except Exception as e:
+            logger.exception("Error in /get_reward")
             return JSONResponse({"error": str(e), "rewards": [], "scores": [], "extra_logs": {}}, status_code=500)
 
     return app
