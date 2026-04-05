@@ -246,6 +246,10 @@ class LLMRayActor:
         """Get current mutation seed from worker."""
         return await self.llm.collective_rpc("get_mutation_seed", args=())
 
+    async def save_hf_checkpoint(self, output_dir: str, tokenizer_path: str) -> bool:
+        """Export current vLLM model weights to a HuggingFace-style directory (ES training)."""
+        return await self.llm.collective_rpc("save_hf_checkpoint", args=(output_dir, tokenizer_path))
+
 
 def create_vllm_engines(
     num_engines: int,
@@ -263,6 +267,7 @@ def create_vllm_engines(
     agent_func_path: Optional[str] = None,
     remote_rm_url: Optional[str] = None,
     worker_extension_cls: str = "openrlhf.trainer.ray.vllm_worker_wrap.WorkerWrap",
+    vllm_max_num_seqs: Optional[int] = None,
 ):
     """Spin up a set of vLLM Ray actors with consistent placement."""
     vllm_engines = []
@@ -321,6 +326,9 @@ def create_vllm_engines(
             assert version.parse(vllm.__version__) > version.parse(
                 "0.10.0"
             ), "vLLM > 0.10.0 is required for logprobs_mode"
+
+        if vllm_max_num_seqs is not None:
+            actor_kwargs["max_num_seqs"] = vllm_max_num_seqs
 
         vllm_engines.append(
             LLMRayActor.options(

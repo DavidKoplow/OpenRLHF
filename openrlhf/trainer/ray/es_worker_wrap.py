@@ -10,6 +10,8 @@ import ast
 import hashlib
 import json
 import os
+import shutil
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import torch
@@ -160,3 +162,39 @@ class ESWorkerWrap(WorkerWrap):
 
         self.current_seed, self.current_std = None, 0.0
         return True
+
+    def save_hf_checkpoint(self, output_dir: str, tokenizer_path: str) -> bool:
+        """Persist current weights and tokenizer to a HuggingFace-compatible folder (rank-0 / TP=1)."""
+        self.revert_mutation()
+        os.makedirs(output_dir, exist_ok=True)
+
+        from transformers import AutoTokenizer
+
+        AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True).save_pretrained(output_dir)
+
+        model = self.model_runner.model
+        saved = False
+        for candidate in (model, getattr(model, "model", None), getattr(model, "llm", None)):
+            if candidate is not None and hasattr(candidate, "save_pretrained"):
+                try:
+                    candidate.save_pretrained(output_dir, safe_serialization=True)
+                    saved = True
+                    break
+                except Exception:
+                    continue
+
+        if not saved:
+            try:
+                from safetensors.torch import save_file
+
+                cfg_src = Path(tokenizer_path) / "config.json"
+                if cfg_src.is_file():
+                    shutil.copy2(cfg_src, Path(output_dir) / "config.json")
+                state_dict = {k: v.detach().cpu() for k, v in model.named_parameters()}
+                save_file(state_dict, os.path.join(output_dir, "model.safetensors"))
+                saved = True
+            except Exception as exc:
+                print(f"[ESWorkerWrap] save_hf_checkpoint fallback failed: {exc}")
+                return False
+
+        return saved

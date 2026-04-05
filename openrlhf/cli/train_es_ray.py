@@ -50,6 +50,7 @@ def train(args):
         agent_func_path=args.agent_func_path,
         remote_rm_url=args.remote_rm_url,
         worker_extension_cls="openrlhf.trainer.ray.es_worker_wrap.ESWorkerWrap",
+        vllm_max_num_seqs=args.vllm_max_num_seqs,
     )
 
     # ES doesn't use actor/critic/reward/reference models - all work is done in vLLM engines
@@ -60,9 +61,11 @@ def train(args):
     reference_model_group = None
 
     # Create a dummy optimizer (ES optimization happens in vLLM workers)
-    # This is just to satisfy the interface
+    # This is just to satisfy the interface; LR matches --es_optimizer_params["lr"].
     dummy_params = [torch.nn.Parameter(torch.zeros(1))]
-    optim = torch.optim.SGD(dummy_params, lr=args.es_learning_rate)
+    _opt_params = json.loads(args.es_optimizer_params.strip())
+    _dummy_lr = float(_opt_params.get("lr", 0.001))
+    optim = torch.optim.SGD(dummy_params, lr=_dummy_lr)
 
     # Create ES trainer with all required parameters
     es_trainer = ESTrainer.remote(
@@ -102,13 +105,12 @@ if __name__ == "__main__":
         help="Each seed gets unique batch via DistributedSampler (ZKL mode). If False, all seeds evaluate same prompts (ES mode).",
     )
     parser.add_argument("--es_std", type=float, default=0.01, help="ES noise standard deviation (sigma)")
-    parser.add_argument("--es_learning_rate", type=float, default=0.001, help="ES learning rate")
     parser.add_argument("--es_optimizer", type=str, default="SGD", help="ES optimizer (SGD, Adam, etc.)")
     parser.add_argument(
         "--es_optimizer_params",
         type=str,
         default='{"lr": 0.001}',
-        help="JSON string of optimizer parameters",
+        help='JSON optimizer kwargs (e.g. {"lr": 0.001}); passed to ES workers. Omitted "lr" defaults to 0.001 for the placeholder optim.',
     )
     parser.add_argument("--es_clip_grad_norm", type=float, default=0.0, help="Gradient clipping norm (0 to disable)")
     parser.add_argument("--mutate_key", type=str, default="all", help="Only mutate params containing this key")
@@ -144,18 +146,83 @@ if __name__ == "__main__":
     parser.add_argument("--enforce_eager", action="store_true", default=False)
     parser.add_argument("--vllm_enable_sleep", action="store_true", default=False)
     parser.add_argument("--vllm_gpu_memory_utilization", type=float, default=0.95)
+    parser.add_argument(
+        "--vllm_max_num_seqs",
+        type=int,
+        default=None,
+        help="vLLM max_num_seqs per engine (scheduling limit). Set to match --batch_size so a full seed batch can run in parallel.",
+    )
 
     # ==================== Checkpoints & Logging ====================
-    parser.add_argument("--save_steps", type=int, default=-1)
+    parser.add_argument(
+        "--save_path",
+        type=str,
+        default="./runs/es",
+        help="Run root: checkpoints/, tensorboard/, and reward metrics align with this path.",
+    )
+    parser.add_argument(
+        "--save_checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save HF checkpoints (latest on save_steps and best on eval). Use --no-save_checkpoint to disable.",
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=-1,
+        help="Save HF checkpoint every N ES steps (optimizer updates). 0 saves once at end of training; -1 disables all HF checkpoints.",
+    )
     parser.add_argument("--logging_steps", type=int, default=1)
-    parser.add_argument("--eval_steps", type=int, default=1, help="Run validation every N steps (0 to disable)")
-    parser.add_argument("--ckpt_path", type=str, default="./ckpt/checkpoints_es")
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=1,
+        help="Run validation every N ES steps (optimizer updates). -1 disables eval during training (step-0 baseline may still run).",
+    )
+    parser.add_argument(
+        "--ckpt_path",
+        type=str,
+        default=None,
+        help="Override checkpoint directory (default: <save_path>/checkpoints).",
+    )
+    parser.add_argument(
+        "--best_eval_metric_key",
+        type=str,
+        default=None,
+        help="Eval metric key for best checkpoint (default: auto, prefer eval_*_pass1). Use 'none' to disable.",
+    )
     parser.add_argument("--load_checkpoint", action="store_true", default=False)
 
     # ==================== Training arguments ====================
-    parser.add_argument("--num_episodes", type=int, default=1)
     parser.add_argument(
-        "--rollout_batch_size", type=int, default=64, help="Prompts per seed (total = this * population_size)"
+        "--max_epochs",
+        type=int,
+        default=None,
+        help="Maximum number of full passes over the training dataset. Default: 1.",
+    )
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=None,
+        help="Deprecated: use --max_epochs (same meaning).",
+    )
+    parser.add_argument(
+        "--max_training_steps",
+        type=int,
+        default=None,
+        help="Maximum number of ES optimizer steps (global_step). Omit for no step limit (epoch limit still applies).",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Number of prompts per seed per ES step. Default: 64.",
+    )
+    parser.add_argument(
+        "--rollout_batch_size",
+        type=int,
+        default=None,
+        help="Deprecated: use --batch_size (prompts per seed per ES step).",
     )
     parser.add_argument("--prompt_max_len", type=int, default=1024)
     parser.add_argument("--generate_max_len", type=int, default=1024)
@@ -168,20 +235,39 @@ if __name__ == "__main__":
 
     # ==================== Model & Data ====================
     parser.add_argument("--pretrain", type=str, required=True, help="HF model name or path")
-    parser.add_argument("--prompt_data", type=str, required=True, help="HF dataset name or path")
+    parser.add_argument("--prompt_data", type=str, required=True, help="HF dataset name or path (comma-separated to blend)")
+    parser.add_argument(
+        "--prompt_data_probs",
+        type=str,
+        default=None,
+        help="Sampling probabilities for blended --prompt_data (e.g. 0.5,0.5); omit to concatenate.",
+    )
     parser.add_argument("--eval_dataset", type=str, default=None)
-    parser.add_argument("--max_samples", type=int, default=1000000, help="Maximum number of samples to use")
+    parser.add_argument(
+        "--eval_dataset_probs",
+        type=str,
+        default=None,
+        help="Sampling probabilities for blended --eval_dataset (e.g. 0.5,0.5); omit to concatenate.",
+    )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Maximum number of training prompts to load from --prompt_data (truncates dataset). Default: 1000000.",
+    )
+
     parser.add_argument(
         "--max_eval_samples",
         type=int,
         default=None,
-        help="Maximum number of eval samples to use (defaults to max_samples)",
+        help="Maximum number of eval prompts to load (defaults to --max_samples).",
     )
     parser.add_argument("--prompt_split", type=str, default="train")
     parser.add_argument("--eval_split", type=str, default="train")
     parser.add_argument("--input_key", type=str, default="input")
     parser.add_argument("--label_key", type=str, default=None)
     parser.add_argument("--input_template", type=str, default=None)
+    parser.add_argument("--apply_chat_template", action="store_true", default=False, help="Use HF tokenizer chat template")
     parser.add_argument("--remote_rm_url", type=str, default=None, help="Remote reward model URL")
     parser.add_argument("--agent_func_path", type=str, default=None, help="Agent script path for reward")
 
@@ -193,9 +279,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wandb_run_name",
         type=str,
-        default="es_%s" % datetime.now().strftime("%m%dT%H:%M"),
+        default="es_%s" % datetime.now().strftime("%m%dT%H-%M"),
     )
     parser.add_argument("--use_tensorboard", type=str, default=None)
+    parser.add_argument(
+        "--tensorboard_text_samples",
+        type=int,
+        default=3,
+        help="Log this many rollout examples as TensorBoard TEXT (0 disables). Train: on logging_steps; eval: every validation.",
+    )
+    parser.add_argument(
+        "--tensorboard_text_max_chars",
+        type=int,
+        default=12000,
+        help="Max characters per decoded sequence shown in TensorBoard text panels.",
+    )
 
     # ==================== ModelScope parameters ====================
     parser.add_argument("--use_ms", action="store_true", default=False)
@@ -207,6 +305,32 @@ if __name__ == "__main__":
     parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
 
     args = parser.parse_args()
+    if args.max_samples is None:
+        args.max_samples = 1000000
+
+    if args.rollout_batch_size is not None and args.batch_size is not None:
+        parser.error("Cannot specify both --rollout_batch_size and --batch_size")
+    if args.rollout_batch_size is not None:
+        print("[Deprecation] --rollout_batch_size is deprecated; use --batch_size")
+        args.batch_size = args.rollout_batch_size
+    if args.batch_size is None:
+        args.batch_size = 64
+    args.rollout_batch_size = args.batch_size
+
+    if args.num_episodes is not None and args.max_epochs is not None:
+        parser.error("Cannot specify both --num_episodes and --max_epochs")
+    if args.num_episodes is not None:
+        print("[Deprecation] --num_episodes is deprecated; use --max_epochs")
+        args.max_epochs = args.num_episodes
+    if args.max_epochs is None:
+        args.max_epochs = 1
+    if args.max_epochs < 1:
+        parser.error("--max_epochs must be >= 1")
+    args.num_episodes = args.max_epochs
+
+    if args.max_training_steps is not None and args.max_training_steps < 1:
+        parser.error("--max_training_steps must be a positive integer")
+
     optimizer_params = args.es_optimizer_params.strip()
     # Set ES optimizer params as environment variables (read by ESWorkerWrap)
     import os
@@ -229,6 +353,7 @@ if __name__ == "__main__":
             optimizer_params = maybe_fixed
         else:
             raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params}")
+    args.es_optimizer_params = optimizer_params
     os.environ["ES_OPTIMIZER"] = args.es_optimizer
     os.environ["ES_OPTIMIZER_PARAMS"] = optimizer_params
     os.environ["ES_CLIP_GRAD_NORM"] = str(args.es_clip_grad_norm)
@@ -249,10 +374,6 @@ if __name__ == "__main__":
             "Fix by pass newline as input_template argument in bash script."
         )
 
-    # Validate
-    if args.save_steps == -1:
-        args.save_steps = float("inf")
-
     # Default population_size to vllm_num_engines if not specified
     if args.population_size is None:
         args.population_size = args.vllm_num_engines
@@ -266,5 +387,14 @@ if __name__ == "__main__":
     # so SingleTurnAgentExecutor can load and use it
     if args.agent_func_path:
         args.remote_rm_url = args.agent_func_path
+
+    args.save_path = os.path.abspath(os.path.expanduser(args.save_path))
+    if args.ckpt_path is None:
+        args.ckpt_path = os.path.join(args.save_path, "checkpoints")
+    else:
+        args.ckpt_path = os.path.abspath(os.path.expanduser(args.ckpt_path))
+    if args.use_tensorboard is None:
+        args.use_tensorboard = os.path.join(args.save_path, "tensorboard")
+    args.use_tensorboard = os.path.abspath(os.path.expanduser(args.use_tensorboard))
 
     train(args)
