@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from vllm import SamplingParams
 
-from openrlhf.trainer.es_utils.data_adapter import ESExperience, EVAL_SEED, STABILIZE_SEED
+from openrlhf.trainer.es_utils.data_adapter import EVAL_SEED, STABILIZE_SEED, ESExperience
 from openrlhf.trainer.ppo_utils.samples_generator import _collect_prompt_batch
 from openrlhf.trainer.ray.launcher import RayActorGroup
 from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call

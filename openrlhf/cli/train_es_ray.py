@@ -235,7 +235,9 @@ if __name__ == "__main__":
 
     # ==================== Model & Data ====================
     parser.add_argument("--pretrain", type=str, required=True, help="HF model name or path")
-    parser.add_argument("--prompt_data", type=str, required=True, help="HF dataset name or path (comma-separated to blend)")
+    parser.add_argument(
+        "--prompt_data", type=str, required=True, help="HF dataset name or path (comma-separated to blend)"
+    )
     parser.add_argument(
         "--prompt_data_probs",
         type=str,
@@ -267,7 +269,9 @@ if __name__ == "__main__":
     parser.add_argument("--input_key", type=str, default="input")
     parser.add_argument("--label_key", type=str, default=None)
     parser.add_argument("--input_template", type=str, default=None)
-    parser.add_argument("--apply_chat_template", action="store_true", default=False, help="Use HF tokenizer chat template")
+    parser.add_argument(
+        "--apply_chat_template", action="store_true", default=False, help="Use HF tokenizer chat template"
+    )
     parser.add_argument("--remote_rm_url", type=str, default=None, help="Remote reward model URL")
     parser.add_argument("--agent_func_path", type=str, default=None, help="Agent script path for reward")
 

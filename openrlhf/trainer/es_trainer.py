@@ -9,12 +9,13 @@ import numpy as np
 import ray
 import torch
 from torch.optim import Optimizer
+
 from openrlhf.trainer.es_utils import checkpoints
 from openrlhf.trainer.es_utils.data_adapter import (
-    ESExperience,
-    ESEvalSample,
     EVAL_SEED,
     STABILIZE_SEED,
+    ESEvalSample,
+    ESExperience,
     prepare_datasets,
     summarize_experience_metrics,
 )
@@ -143,9 +144,7 @@ class ESTrainer:
             label = sample.labels[0] if sample.labels else ""
             seed_val = int(sample.seeds[0].item()) if sample.seeds is not None and sample.seeds.numel() else None
             reward_s = (
-                f"{sample.rewards[0].item():.6f}"
-                if sample.rewards is not None and sample.rewards.numel()
-                else "None"
+                f"{sample.rewards[0].item():.6f}" if sample.rewards is not None and sample.rewards.numel() else "None"
             )
             extra_parts: List[str] = []
             if sample.info:
@@ -281,7 +280,11 @@ class ESTrainer:
                 client_states=client_states,
             )
             if self.critic_model_group is not None:
-                refs.extend(self.critic_model_group.async_run_method(method_name="save_checkpoint", tag=f"global_step{global_step}"))
+                refs.extend(
+                    self.critic_model_group.async_run_method(
+                        method_name="save_checkpoint", tag=f"global_step{global_step}"
+                    )
+                )
             ray.get(refs)
 
     def fit(self) -> None:
@@ -310,14 +313,9 @@ class ESTrainer:
                     stop_training = True
                     break
 
-                run_eval = bool(
-                    self.eval_dataloader
-                    and (global_step + 1) % self.args.eval_steps == 0
-                )
+                run_eval = bool(self.eval_dataloader and (global_step + 1) % self.args.eval_steps == 0)
                 eval_start_time = time.time() if run_eval else None
-                status, global_step, is_exhausted, eval_samples = self.train_step(
-                    global_step, include_eval=run_eval
-                )
+                status, global_step, is_exhausted, eval_samples = self.train_step(global_step, include_eval=run_eval)
                 if eval_samples is not None:
                     self._log_eval(global_step, eval_samples, eval_start_time, **self.generate_kwargs)
                 if global_step % self.args.logging_steps == 0:
@@ -408,11 +406,12 @@ class ESTrainer:
             std = 1.0
         normalized = (scores_tensor - mean) / std
         return [
-            (seed, norm_score, self.es_std)
-            for (seed, _), norm_score in zip(seed_means.items(), normalized.tolist())
+            (seed, norm_score, self.es_std) for (seed, _), norm_score in zip(seed_means.items(), normalized.tolist())
         ]
 
-    def _log_eval(self, global_step: int, samples_list: List[ESExperience], start_time: float, **generate_kwargs) -> None:
+    def _log_eval(
+        self, global_step: int, samples_list: List[ESExperience], start_time: float, **generate_kwargs
+    ) -> None:
         n_tb = self._es_tb_text_sample_count()
         if self.tensorboard_logger and samples_list and n_tb > 0:
             self._tensorboard_log_rollout_text(

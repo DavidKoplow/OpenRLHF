@@ -7,8 +7,8 @@ Components are loaded dynamically by the launcher based on HEURISTICS config.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import importlib
+import inspect
 import json
 import sys
 from contextlib import asynccontextmanager
@@ -21,11 +21,13 @@ from fastapi.responses import JSONResponse
 
 Values = Dict[str, List[float]]
 
+
 class RewardComponent:
     """
     Return values.
     values: dict[key -> list[float]] length N
     """
+
     def should_call(self, label: str) -> bool:
         return True
 
@@ -155,9 +157,7 @@ class BatchEngine:
                 counts.append(len(p))
 
             try:
-                rewards, logs = await asyncio.to_thread(
-                    self.agg.score, all_q, all_p, all_l
-                )
+                rewards, logs = await asyncio.to_thread(self.agg.score, all_q, all_p, all_l)
             except Exception as exc:
                 # Propagate error to all waiting futures so callers see
                 # the exception instead of hanging forever.
@@ -168,8 +168,8 @@ class BatchEngine:
 
             idx = 0
             for (_, _, _, fut), n in zip(items, counts):
-                part_rewards = rewards[idx:idx + n]
-                part_logs = {k: v[idx:idx + n] for k, v in logs.items()}
+                part_rewards = rewards[idx : idx + n]
+                part_logs = {k: v[idx : idx + n] for k, v in logs.items()}
                 idx += n
                 if not fut.done():
                     fut.set_result((part_rewards, part_logs))
@@ -186,7 +186,7 @@ def create_app(
 ) -> FastAPI:
     """
     Create the FastAPI reward server application.
-    
+
     Args:
         components: List of reward components to apply.
         device: PyTorch device for computation
@@ -222,10 +222,7 @@ def create_app(
             # Compute rewards
             rewards, extra_logs = await engine.enqueue(queries, prompts, labels)
 
-            sanitized_extra_logs = {
-                k: [v if v is not None else 0.0 for v in vals]
-                for k, vals in extra_logs.items()
-            }
+            sanitized_extra_logs = {k: [v if v is not None else 0.0 for v in vals] for k, vals in extra_logs.items()}
 
             for key, vals in list(sanitized_extra_logs.items()):
                 if len(vals) < n:
@@ -239,12 +236,10 @@ def create_app(
             return JSONResponse({"rewards": rewards, "scores": rewards, "extra_logs": sanitized_extra_logs})
         except Exception as e:
             import traceback
+
             print(f"Error in get_reward: {e}")
             traceback.print_exc()
-            return JSONResponse(
-                {"error": str(e), "rewards": [], "scores": [], "extra_logs": {}},
-                status_code=500
-            )
+            return JSONResponse({"error": str(e), "rewards": [], "scores": [], "extra_logs": {}}, status_code=500)
 
     return app
 
@@ -278,12 +273,18 @@ def load_heuristic(class_path: str, kwargs: dict, device: torch.device) -> Rewar
 
 def main():
     import argparse
+
     import uvicorn
-    
+
     parser = argparse.ArgumentParser(description="FastAPI reward server launcher")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
-    parser.add_argument("--reward_model", type=str, default="OpenAssistant/reward-model-deberta-v3-large-v2", help="HF model for HFRewardModel")
+    parser.add_argument(
+        "--reward_model",
+        type=str,
+        default="OpenAssistant/reward-model-deberta-v3-large-v2",
+        help="HF model for HFRewardModel",
+    )
     parser.add_argument("--max_len", type=int, default=1024, help="Max sequence length for reward model")
     parser.add_argument("--bf16", action="store_true", help="Use bfloat16 for reward model")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for reward computation")
@@ -296,19 +297,19 @@ def main():
         help="Log each HTTP request to the console (default: off; use --access-log to enable).",
     )
     args = parser.parse_args()
-    
+
     try:
         heuristics_config = json.loads(args.heuristics)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid HEURISTICS JSON: {e}")
-        
+
     if not isinstance(heuristics_config, list):
         raise ValueError(f"HEURISTICS must be a list, got: {type(heuristics_config)}")
-        
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     components: List[RewardComponent] = []
-    
+
     # Simple list of heuristics
     for heuristic_dict in heuristics_config:
         class_path = heuristic_dict.get("class_path")
@@ -317,7 +318,7 @@ def main():
             raise ValueError(f"Heuristic config missing 'class_path': {heuristic_dict}")
         comp = load_heuristic(class_path, kwargs, device)
         components.append(comp)
-                
+
     expected_log_keys = []
     for heuristic_dict in heuristics_config:
         keys = heuristic_dict.get("expected_keys", [])
@@ -330,8 +331,9 @@ def main():
         max_wait_ms=args.max_wait_ms,
         expected_extra_log_keys=expected_log_keys,
     )
-    
+
     uvicorn.run(app, host=args.host, port=args.port, access_log=args.access_log)
+
 
 if __name__ == "__main__":
     main()
