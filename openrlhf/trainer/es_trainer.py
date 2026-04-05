@@ -402,7 +402,7 @@ class ESTrainer:
         scores_tensor = torch.tensor(list(seed_means.values()), dtype=torch.float32)
         mean = scores_tensor.mean()
         std = scores_tensor.std()
-        if std < 1e-8:
+        if torch.isnan(std) or std < 1e-8:
             std = 1.0
         normalized = (scores_tensor - mean) / std
         return [
