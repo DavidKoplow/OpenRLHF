@@ -47,8 +47,9 @@ class CountdownAccuracyHeuristic:
                     continue
 
                 # 2. Use an empty dict {} for builtins instead of None to prevent TypeError
-                result = float(eval(clean_expr, {"__builtins__": {}}, {}))
-
+                # Note this is not a security risk since this is an optional example to run on LLM generated code that we have already cleaned.
+                result = float(eval(clean_expr, {"__builtins__": {}}, {})) 
+                
                 if abs(result - tgt) < 1e-5:
                     rewards.append(1.0)
                 else:

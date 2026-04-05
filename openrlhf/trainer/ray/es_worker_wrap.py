@@ -21,12 +21,12 @@ from .vllm_worker_wrap import WorkerWrap
 STABILIZE_SEED = -1
 
 
+# This function is run population * num_params times, but only takes a few microseconds so it's never a bottleneck.
 def _noise(p: torch.Tensor, name: str, seed: int) -> torch.Tensor:
-
     g = torch.Generator(device=p.device)
     h = int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little")
     g.manual_seed((seed ^ h) & 0xFFFFFFFF)
-    n = torch.normal(0, 1, size=p.shape, device=p.device, generator=g, dtype=p.dtype)
+    n = torch.normal(0, 1, size=p.shape, device=p.device, generator=g, dtype=p.dtype)  # the noise needs to be fp16 or bf16 for addition/subtraction to be reversible in float32.
 
     return n
 
@@ -43,7 +43,7 @@ class ESWorkerWrap(WorkerWrap):
             for n, p in self.model_runner.model.named_parameters():
                 orig_dtype = p.data.dtype
                 p.data.copy_(
-                    (p.data.float() - _noise(p.data, n, self.current_seed).float() * self.current_std).to(orig_dtype)
+                    (p.data.float() - _noise(p.data, n, self.current_seed).float() * self.current_std).to(orig_dtype) # Note this is perfectly reversible since we upcast to float32 prior to doing addition/subtraction.
                 )
         self.current_seed, self.current_std = None, 0.0
         return True
@@ -119,10 +119,11 @@ class ESWorkerWrap(WorkerWrap):
         self.revert_mutation()
 
 
+        # We stage weight updates and perform an optimizer step per parameter to minimize memory usage.
+
         clip = float(os.getenv("ES_CLIP_GRAD_NORM", "0.0"))
         optimizer = self._get_or_create_optimizer()
-        optimizer.zero_grad(set_to_none=True)
-
+        optimizer.zero_grad(set_to_none=True)        
         for name, p in self.model_runner.model.named_parameters():
 
             # Move optimizer state to GPU if needed
@@ -136,7 +137,8 @@ class ESWorkerWrap(WorkerWrap):
             g = torch.zeros_like(p, dtype=torch.float32)
             for seed, w, _ in updates:
                 if isinstance(seed, int) and seed != STABILIZE_SEED:
-                    g.add_(_noise(p.data, name, seed).float(), alpha=float(w)) # Note we don't need to divide by sigma since noise has std=1, all sigmas are the same, and weights are already normalized.
+                    # Note we don't need to divide by sigma since noise has std=1, all sigmas are the same, and weights are already normalized.
+                    g.add_(_noise(p.data, name, seed).float(), alpha=float(w)) 
             g.div_(max(1, len(updates)))
 
             # ES uses negative gradient (we want to move in direction of positive scores)
@@ -148,7 +150,7 @@ class ESWorkerWrap(WorkerWrap):
             optimizer.step()
             p.grad = None
 
-            # Move optimizer state back to CPU to save memory
+            # Move optimizer state back to CPU to save memory. This is slightly slower than keeping it on the GPU, but is more than offset by allowing vLLM to use all of the GPU for inference. 
             st = optimizer.state.get(p)
             if st:
                 for k, v in list(st.items()):
