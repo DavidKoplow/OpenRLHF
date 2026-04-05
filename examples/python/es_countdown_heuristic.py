@@ -43,6 +43,11 @@ class CountdownAccuracyHeuristic(RewardComponent):
                     continue
 
                 # 2. Use an empty dict {} for builtins instead of None to prevent TypeError
+                if "**" in clean_expr:
+                    rewards.append(0.0)
+                    continue
+
+                # 2. Use an empty dict {} for builtins instead of None to prevent TypeError
                 result = float(eval(clean_expr, {"__builtins__": {}}, {}))
 
                 if abs(result - tgt) < 1e-5:
