@@ -86,34 +86,53 @@ class SamplesGenerator:
 
     @torch.no_grad()
     def generate_samples(self, **generate_kwargs) -> Tuple[List[Experience], Optional[float], int, bool]:
-        """Produce one batch and indicate if the dataloader is exhausted."""
+        """Produce one training-sized batch and indicate if the dataloader is exhausted.
+
+        When vllm_generate_batch_size > rollout_batch_size, a single vLLM call
+        may produce more samples than one training step needs.  Extras are kept
+        in ``_sample_buffer`` and served in subsequent calls without hitting vLLM.
+        """
         if getattr(self, "_dataloader_iter", None) is None:
             self._dataloader_iter = iter(self.prompts_dataloader)
+            self._sample_buffer: List[Experience] = []
 
-        # Wake sleeping vLLM engines before dispatching.
-        if self.args.vllm_enable_sleep:
-            batch_vllm_engine_call(self.vllm_engines, "wake_up")
-
-        experiences, prompts_consumed, exhausted = self._generate_vllm(
-            dataloader_iter=self._dataloader_iter,
-            num_prompts=self.args.rollout_batch_size,
-            dynamic_filtering=self.args.dynamic_filtering,
-            **generate_kwargs,
-        )
-
-        # Put engines back to sleep when enabled.
-        if self.args.vllm_enable_sleep:
-            batch_vllm_engine_call(self.vllm_engines, "sleep")
-
+        chunk_size = self.args.rollout_batch_size * self.args.n_samples_per_prompt
+        prompts_consumed = 0
         filter_pass_rate = None
-        if self.args.dynamic_filtering and prompts_consumed:
-            filter_pass_rate = len(experiences) / prompts_consumed * 100
 
-        if exhausted:
-            self._dataloader_iter = None
-            logger.info("Prompt dataloader is exhausted.")
+        # Fill buffer if it doesn't have enough for one training chunk.
+        if len(self._sample_buffer) < chunk_size and self._dataloader_iter is not None:
+            if self.args.vllm_enable_sleep:
+                batch_vllm_engine_call(self.vllm_engines, "wake_up")
 
-        return experiences, filter_pass_rate, prompts_consumed, exhausted
+            gen_batch_size = getattr(self.args, "vllm_generate_batch_size", None) or self.args.rollout_batch_size
+            experiences, prompts_consumed, dl_exhausted = self._generate_vllm(
+                dataloader_iter=self._dataloader_iter,
+                num_prompts=gen_batch_size,
+                dynamic_filtering=self.args.dynamic_filtering,
+                **generate_kwargs,
+            )
+
+            if self.args.vllm_enable_sleep:
+                batch_vllm_engine_call(self.vllm_engines, "sleep")
+
+            if self.args.dynamic_filtering and prompts_consumed:
+                filter_pass_rate = len(experiences) / prompts_consumed * 100
+
+            self._sample_buffer.extend(experiences)
+
+            if dl_exhausted:
+                self._dataloader_iter = None
+                logger.info("Prompt dataloader is exhausted.")
+
+        # Take up to one training chunk from the buffer.
+        rollout_samples = self._sample_buffer[:chunk_size]
+        self._sample_buffer = self._sample_buffer[chunk_size:]
+
+        # Exhausted only when dataloader is done AND buffer is fully drained.
+        exhausted = self._dataloader_iter is None and len(self._sample_buffer) == 0
+
+        return rollout_samples, filter_pass_rate, prompts_consumed, exhausted
 
     def _generate_vllm(
         self, dataloader_iter, num_prompts: int, dynamic_filtering, **generate_kwargs

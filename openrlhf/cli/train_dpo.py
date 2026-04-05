@@ -86,6 +86,7 @@ def train(args):
         True,
         True,
         train_dataset.collate_fn,
+        num_workers=args.dataloader_num_workers,
     )
 
     eval_dataset = None
@@ -111,6 +112,7 @@ def train(args):
             True,
             False,
             eval_dataset.collate_fn,
+            num_workers=args.dataloader_num_workers,
         )
 
     # scheduler
@@ -131,9 +133,10 @@ def train(args):
     # load checkpoint
     consumed_samples = 0
     if args.load_checkpoint and os.path.exists(args.ckpt_path):
-        _, states = strategy.load_ckpt(model.model, args.ckpt_path)
-        consumed_samples = states["consumed_samples"]
-        strategy.print(f"Loaded the checkpoint: {args.ckpt_path}, consumed_samples: {consumed_samples}")
+        load_path, states = strategy.load_ckpt(model.model, args.ckpt_path)
+        if load_path is not None:
+            consumed_samples = states["consumed_samples"]
+            strategy.print(f"Loaded the checkpoint: {args.ckpt_path}, consumed_samples: {consumed_samples}")
 
     os.makedirs(args.save_path, exist_ok=True)
 
@@ -190,6 +193,7 @@ if __name__ == "__main__":
         help="Enable reproducible behavior during distributed training",
     )
     parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
+    parser.add_argument("--dataloader_num_workers", type=int, default=0, help="Number of dataloader workers for IO")
     parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for deepspeed")
     parser.add_argument("--zero_stage", type=int, default=2, help="DeepSpeed ZeRO stage")
     parser.add_argument(

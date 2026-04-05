@@ -1,4 +1,5 @@
 import argparse
+import os
 from datetime import datetime
 
 import ray
@@ -18,12 +19,14 @@ from openrlhf.utils import get_strategy
 def train(args):
     # initialize ray if not initialized
     if not ray.is_initialized():
+        # Use os.environ.get() to respect user-set values (e.g. NCCL_DEBUG=INFO via
+        # ray job submit --runtime-env-json), falling back to sensible defaults.
         ray.init(
             runtime_env={
                 "env_vars": {
-                    "TOKENIZERS_PARALLELISM": "true",
-                    "NCCL_DEBUG": "WARN",
-                    "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": "1",
+                    "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
+                    "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
+                    "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
                 }
             }
         )
@@ -327,6 +330,12 @@ if __name__ == "__main__":
     parser.add_argument("--gradient_checkpointing_use_reentrant", action="store_true", default=False)
     parser.add_argument("--disable_fast_tokenizer", action="store_true", default=False)
     parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=0,
+        help="Number of dataloader workers for IO (for Ray training, ensure sufficient CPU resources per actor)",
+    )
+    parser.add_argument(
         "--deepspeed_enable_sleep",
         action="store_true",
         default=False,
@@ -595,6 +604,12 @@ if __name__ == "__main__":
     # Set vLLM generate_batch_size to rollout_batch_size if not specified
     if not args.vllm_generate_batch_size:
         args.vllm_generate_batch_size = args.rollout_batch_size
+
+    if args.vllm_generate_batch_size > args.rollout_batch_size:
+        assert args.async_train, (
+            "--vllm_generate_batch_size > --rollout_batch_size requires --async_train "
+            "(over-sampling needs async queue to buffer extra batches)."
+        )
 
     if args.dynamic_filtering:
         assert (
