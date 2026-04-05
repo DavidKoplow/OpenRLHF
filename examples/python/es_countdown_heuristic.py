@@ -1,10 +1,9 @@
 import ast
 import re
 from typing import Dict, List
-from tasks.reward_server import RewardComponent
 
 
-class CountdownAccuracyHeuristic(RewardComponent):
+class CountdownAccuracyHeuristic:
     def should_call(self, label: str) -> bool:
         return bool(label and str(label).strip())
 
@@ -63,7 +62,7 @@ class CountdownAccuracyHeuristic(RewardComponent):
         return {"countdown_accuracy": rewards}
 
 
-class CountdownFormatHeuristic(RewardComponent):
+class CountdownFormatHeuristic:
     def __init__(self):
         self.gpus, self.cpus = 0, 1
 
@@ -81,3 +80,6 @@ class CountdownFormatHeuristic(RewardComponent):
                 for q in queries
             ]
         }
+
+
+HEURISTICS = [CountdownAccuracyHeuristic, CountdownFormatHeuristic]

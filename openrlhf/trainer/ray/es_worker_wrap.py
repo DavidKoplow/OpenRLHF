@@ -91,7 +91,7 @@ class ESWorkerWrap(WorkerWrap):
         try:
             optimizer_params = json.loads(optimizer_params_str)
         except json.JSONDecodeError:
-            optimizer_params = ast.literal_eval(optimizer_params_str)
+            raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params_str}")
 
         # Get model parameters
         params = [p for n, p in self.model_runner.model.named_parameters()]
@@ -118,11 +118,6 @@ class ESWorkerWrap(WorkerWrap):
         # Revert any current mutation before applying gradient
         self.revert_mutation()
 
-        if len(updates) > 1:
-            sc = torch.tensor([x[1] for x in updates], dtype=torch.float32)
-            sd = sc.std()
-            sc = (sc - sc.mean()) / sd if sd > 1e-8 else (sc - sc.mean())
-            updates = [(seed, float(v), sig) for (seed, _, sig), v in zip(updates, sc)]
 
         clip = float(os.getenv("ES_CLIP_GRAD_NORM", "0.0"))
         optimizer = self._get_or_create_optimizer()
@@ -141,7 +136,7 @@ class ESWorkerWrap(WorkerWrap):
             g = torch.zeros_like(p, dtype=torch.float32)
             for seed, w, _ in updates:
                 if isinstance(seed, int) and seed != STABILIZE_SEED:
-                    g.add_(_noise(p.data, name, seed).float(), alpha=float(w))
+                    g.add_(_noise(p.data, name, seed).float(), alpha=float(w)) # Note we don't need to divide by sigma since noise has std=1, all sigmas are the same, and weights are already normalized.
             g.div_(max(1, len(updates)))
 
             # ES uses negative gradient (we want to move in direction of positive scores)

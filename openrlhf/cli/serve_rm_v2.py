@@ -2,16 +2,14 @@
 """
 FastAPI reward server with batching and component aggregation.
 
-Components are loaded dynamically by the launcher based on HEURISTICS config.
+Components are loaded dynamically from a heuristics Python file.
 """
 from __future__ import annotations
 
 import asyncio
-import importlib
+import importlib.util
 import inspect
-import json
 import logging
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +34,21 @@ class RewardComponent:
 
     def __call__(self, queries: List[str], prompts: List[str], labels: List[str]) -> Values:
         raise NotImplementedError
+
+
+class NamedRewardComponent:
+    def __init__(self, name: str, component: RewardComponent):
+        self.name = name
+        self.component = component
+
+    def should_call(self, label: str) -> bool:
+        return self.component.should_call(label)
+
+    def __call__(self, queries: List[str], prompts: List[str], labels: List[str]) -> Values:
+        values = self.component(queries, prompts, labels)
+        if len(values) != 1:
+            raise ValueError(f"{self.name} must return exactly one reward key, got: {list(values.keys())}")
+        return {self.name: next(iter(values.values()))}
 
 
 class Aggregator:
@@ -239,31 +252,47 @@ def create_app(
     return app
 
 
-def load_heuristic(class_path: str, kwargs: dict, device: torch.device) -> RewardComponent:
-    # Add PR/OpenRLHF to sys.path so we can import examples
-    project_root = Path(__file__).resolve().parent.parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
+def load_heuristics(heuristics_path: str, device: torch.device) -> Tuple[List[RewardComponent], List[str]]:
+    path = Path(heuristics_path).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"Heuristics file not found: {heuristics_path}")
 
-    # Add ZKL_Code to sys.path so we can import tasks
-    zkl_root = project_root.parent.parent
-    if str(zkl_root) not in sys.path:
-        sys.path.insert(0, str(zkl_root))
+    spec = importlib.util.spec_from_file_location(f"_heuristics_{path.stem}", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Could not load heuristics file: {path}")
 
-    # Dynamically import module and class
-    if "." not in class_path:
-        raise ValueError(f"Heuristic name must be a full module path, e.g. 'module.path.ClassName', got: {class_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
-    module_path, class_name = class_path.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    cls = getattr(module, class_name)
+    heuristic_classes = getattr(module, "HEURISTICS", None)
+    if not isinstance(heuristic_classes, list) or not heuristic_classes:
+        raise ValueError(f"{path} must define a non-empty HEURISTICS list")
 
-    # If the class accepts a device, pass it
-    sig = inspect.signature(cls.__init__)
-    if "device" in sig.parameters:
-        kwargs["device"] = device
+    components: List[RewardComponent] = []
+    expected_log_keys: List[str] = []
+    seen_names: set[str] = set()
+    for cls in heuristic_classes:
+        if not inspect.isclass(cls):
+            raise ValueError(f"HEURISTICS entries must be classes, got: {cls!r}")
+        if cls.__name__ in seen_names:
+            raise ValueError(f"Duplicate heuristic class name: {cls.__name__}")
+        seen_names.add(cls.__name__)
 
-    return cls(**kwargs)
+        sig = inspect.signature(cls.__init__)
+        kwargs = {}
+        for name, param in list(sig.parameters.items())[1:]:
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if name == "device":
+                kwargs["device"] = device
+                continue
+            if param.default is inspect.Parameter.empty:
+                raise ValueError(f"{cls.__name__} requires unsupported init arg: {name}")
+
+        components.append(NamedRewardComponent(cls.__name__, cls(**kwargs)))
+        expected_log_keys.append(cls.__name__)
+
+    return components, expected_log_keys
 
 
 def main():
@@ -274,17 +303,9 @@ def main():
     parser = argparse.ArgumentParser(description="FastAPI reward server launcher")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Server host")
     parser.add_argument("--port", type=int, default=8000, help="Server port")
-    parser.add_argument(
-        "--reward_model",
-        type=str,
-        default="OpenAssistant/reward-model-deberta-v3-large-v2",
-        help="HF model for HFRewardModel",
-    )
-    parser.add_argument("--max_len", type=int, default=1024, help="Max sequence length for reward model")
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 for reward model")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for reward computation")
     parser.add_argument("--max_wait_ms", type=float, default=5.0, help="Max wait time for batching (ms)")
-    parser.add_argument("--heuristics", type=str, default="[]", help="JSON heuristics config")
+    parser.add_argument("--heuristics", type=str, required=True, help="Path to a Python file defining HEURISTICS")
     parser.add_argument(
         "--access-log",
         action=argparse.BooleanOptionalAction,
@@ -293,31 +314,8 @@ def main():
     )
     args = parser.parse_args()
 
-    try:
-        heuristics_config = json.loads(args.heuristics)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid HEURISTICS JSON: {e}")
-
-    if not isinstance(heuristics_config, list):
-        raise ValueError(f"HEURISTICS must be a list, got: {type(heuristics_config)}")
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    components: List[RewardComponent] = []
-
-    # Simple list of heuristics
-    for heuristic_dict in heuristics_config:
-        class_path = heuristic_dict.get("class_path")
-        kwargs = heuristic_dict.get("kwargs", {})
-        if not class_path:
-            raise ValueError(f"Heuristic config missing 'class_path': {heuristic_dict}")
-        comp = load_heuristic(class_path, kwargs, device)
-        components.append(comp)
-
-    expected_log_keys = []
-    for heuristic_dict in heuristics_config:
-        keys = heuristic_dict.get("expected_keys", [])
-        expected_log_keys.extend(keys)
+    components, expected_log_keys = load_heuristics(args.heuristics, device)
 
     app = create_app(
         components,

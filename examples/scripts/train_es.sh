@@ -2,7 +2,7 @@ set -x
 
 readonly RM_PORT=8000
 readonly RM_URL="http://127.0.0.1:${RM_PORT}/get_reward"
-readonly HEURISTICS='[{"class_path": "examples.python.es_countdown_heuristic.CountdownAccuracyHeuristic", "expected_keys": ["countdown_accuracy"]}, {"class_path": "examples.python.es_countdown_heuristic.CountdownFormatHeuristic", "expected_keys": ["countdown_format"]}]'
+readonly HEURISTICS="examples/python/es_countdown_heuristic.py"
 
 readonly SAVE_PATH=".checkpoint"
 readonly ES_BATCH_SIZE=200

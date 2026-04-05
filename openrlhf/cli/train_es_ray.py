@@ -53,19 +53,10 @@ def train(args):
         vllm_max_num_seqs=args.vllm_max_num_seqs,
     )
 
-    # ES doesn't use actor/critic/reward/reference models - all work is done in vLLM engines
-    # Pass None for these model groups
     actor_model_group = None
     critic_model_group = None
     reward_model_group = None  # ES uses rewards from agent or response directly
     reference_model_group = None
-
-    # Create a dummy optimizer (ES optimization happens in vLLM workers)
-    # This is just to satisfy the interface; LR matches --es_optimizer_params["lr"].
-    dummy_params = [torch.nn.Parameter(torch.zeros(1))]
-    _opt_params = json.loads(args.es_optimizer_params.strip())
-    _dummy_lr = float(_opt_params.get("lr", 0.001))
-    optim = torch.optim.SGD(dummy_params, lr=_dummy_lr)
 
     # Create ES trainer with all required parameters
     stop_sequences = [args.stop_token] if args.stop_token else []
@@ -77,7 +68,6 @@ def train(args):
         reward_model_group=reward_model_group,
         reference_model_group=reference_model_group,
         vllm_engines=vllm_engines,
-        optim=optim,
         # Generation kwargs passed as **kwargs (see --stop_token, --skip_special_tokens, sampling args)
         prompt_max_len=args.prompt_max_len,
         max_new_tokens=args.generate_max_len,
@@ -358,21 +348,8 @@ if __name__ == "__main__":
     try:
         json.loads(optimizer_params)
     except json.JSONDecodeError:
-        # Common failure: a single extra trailing brace from shell/env quoting.
-        if optimizer_params.endswith("}"):
-            maybe_fixed = optimizer_params[:-1].rstrip()
-            try:
-                json.loads(maybe_fixed)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params}") from exc
-            print(
-                "[Warning] Fixed invalid --es_optimizer_params by stripping a "
-                "trailing '}'. Consider fixing the source config."
-            )
-            optimizer_params = maybe_fixed
-        else:
-            raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params}")
-    args.es_optimizer_params = optimizer_params
+        raise ValueError(f"Invalid --es_optimizer_params JSON: {optimizer_params}")
+
     os.environ["ES_OPTIMIZER"] = args.es_optimizer
     os.environ["ES_OPTIMIZER_PARAMS"] = optimizer_params
     os.environ["ES_CLIP_GRAD_NORM"] = str(args.es_clip_grad_norm)
@@ -395,13 +372,8 @@ if __name__ == "__main__":
     if args.population_size is None:
         args.population_size = args.vllm_num_engines
 
-    # Set es_shared_batch based on unique_batch_per_seed flag
-    # unique_batch_per_seed=True means es_shared_batch=False (each seed gets unique data)
-    # unique_batch_per_seed=False means es_shared_batch=True (all seeds share same data)
     args.es_shared_batch = not args.unique_batch_per_seed
 
-    # For ES with agent_func_path, set remote_rm_url to the function path
-    # so SingleTurnAgentExecutor can load and use it
     if args.agent_func_path:
         args.remote_rm_url = args.agent_func_path
 

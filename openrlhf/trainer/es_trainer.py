@@ -8,7 +8,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import ray
 import torch
-from torch.optim import Optimizer
 
 from openrlhf.trainer.es_utils import checkpoints
 from openrlhf.trainer.es_utils.data_adapter import (
@@ -51,7 +50,6 @@ class ESTrainer:
         reward_model_group,
         reference_model_group,
         vllm_engines: List,
-        optim: Optimizer,
         **generate_kwargs,
     ) -> None:
         if strategy.args.eval_steps == -1:
@@ -59,7 +57,6 @@ class ESTrainer:
 
         self.strategy = strategy
         self.args = strategy.args
-        self.optim = optim
         self.reward_model_group = reward_model_group
         self.vllm_engines = vllm_engines
         self.actor_model_group = actor_model_group
