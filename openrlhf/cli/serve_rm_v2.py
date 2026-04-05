@@ -224,11 +224,6 @@ def create_app(
 
             sanitized_extra_logs = {k: [v if v is not None else 0.0 for v in vals] for k, vals in extra_logs.items()}
 
-            for key, vals in list(sanitized_extra_logs.items()):
-                if len(vals) < n:
-                    sanitized_extra_logs[key] = vals + [0.0] * (n - len(vals))
-                elif len(vals) > n:
-                    sanitized_extra_logs[key] = vals[:n]
             for key in expected_log_keys:
                 if key not in sanitized_extra_logs:
                     sanitized_extra_logs[key] = [0.0] * n
