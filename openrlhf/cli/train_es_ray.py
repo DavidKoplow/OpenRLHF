@@ -10,7 +10,6 @@ import os
 from datetime import datetime
 
 import ray
-import torch
 
 from openrlhf.trainer.es_trainer import ESTrainer
 from openrlhf.trainer.ray import create_vllm_engines

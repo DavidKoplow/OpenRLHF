@@ -6,7 +6,6 @@ Extends WorkerWrap with Evolutionary Strategies (ES) capabilities:
 - get_mutation_seed: Return current mutation seed for response tagging
 """
 
-import ast
 import hashlib
 import json
 import os
@@ -118,7 +117,6 @@ class ESWorkerWrap(WorkerWrap):
         # Revert any current mutation before applying gradient
         self.revert_mutation()
 
-
         clip = float(os.getenv("ES_CLIP_GRAD_NORM", "0.0"))
         optimizer = self._get_or_create_optimizer()
         optimizer.zero_grad(set_to_none=True)
@@ -136,7 +134,9 @@ class ESWorkerWrap(WorkerWrap):
             g = torch.zeros_like(p, dtype=torch.float32)
             for seed, w, _ in updates:
                 if isinstance(seed, int) and seed != STABILIZE_SEED:
-                    g.add_(_noise(p.data, name, seed).float(), alpha=float(w)) # Note we don't need to divide by sigma since noise has std=1, all sigmas are the same, and weights are already normalized.
+                    g.add_(
+                        _noise(p.data, name, seed).float(), alpha=float(w)
+                    )  # Note we don't need to divide by sigma since noise has std=1, all sigmas are the same, and weights are already normalized.
             g.div_(max(1, len(updates)))
 
             # ES uses negative gradient (we want to move in direction of positive scores)
