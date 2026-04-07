@@ -4,6 +4,9 @@ from typing import Dict, List
 
 
 class CountdownAccuracyHeuristic:
+    gpus = 0
+    cpus = 2
+
     def should_call(self, label: str) -> bool:
         return bool(label and str(label).strip())
 
@@ -64,8 +67,8 @@ class CountdownAccuracyHeuristic:
 
 
 class CountdownFormatHeuristic:
-    def __init__(self):
-        self.gpus, self.cpus = 0, 1
+    gpus = 0
+    cpus = 2
 
     def should_call(self, label: str) -> bool:
         return bool(label and str(label).strip())
@@ -81,6 +84,5 @@ class CountdownFormatHeuristic:
                 for q in queries
             ]
         }
-
 
 HEURISTICS = [CountdownAccuracyHeuristic, CountdownFormatHeuristic]

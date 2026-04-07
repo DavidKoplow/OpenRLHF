@@ -1,7 +1,6 @@
 set -x
 
-readonly RM_PORT=8000
-readonly RM_URL="http://127.0.0.1:${RM_PORT}/get_reward"
+# Run from the OpenRLHF repo root so this path resolves.
 readonly HEURISTICS="examples/python/es_countdown_heuristic.py"
 
 readonly SAVE_PATH=".checkpoint"
@@ -11,17 +10,6 @@ module purge
 module load StdEnv 2>/dev/null || true
 module load gcc/12.2.0 2>/dev/null || true
 module load cuda/13.0.1
-
-
-# Start the reward server
-echo "Starting reward server..."
-uv run --no-project python -m openrlhf.cli.serve_rm_v2  \
-    --port ${RM_PORT} \
-    --heuristics "${HEURISTICS}" &
-RM_PID=$!
-
-# Wait for server to start
-sleep 15
 
 
 if [[ ${1} != "slurm" ]]; then
@@ -38,7 +26,7 @@ if [[ ${1} != "slurm" ]]; then
       --input_key prompt \
       --label_key label \
       --apply_chat_template \
-      --remote_rm_url "${RM_URL}" \
+      --heuristics "${HEURISTICS}" \
       --vllm_num_engines 4 \
       --vllm_tensor_parallel_size 1 \
       --vllm_gpu_memory_utilization 0.9 \
@@ -51,7 +39,7 @@ if [[ ${1} != "slurm" ]]; then
       --batch_size "${ES_BATCH_SIZE}" \
       --max_samples 204800 \
       --max_eval_samples 200 \
-      --max_len 1024 \
+      --max_len 1536 \
       --temperature 0.0 \
       --top_k -1 \
       --min_new_tokens 1 \
@@ -66,7 +54,3 @@ if [[ ${1} != "slurm" ]]; then
       --tensorboard_text_max_chars 12000 \
       --seed 42
 fi
-
-# Cleanup reward server
-kill $RM_PID
-wait $RM_PID 2>/dev/null || true

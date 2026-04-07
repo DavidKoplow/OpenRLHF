@@ -7,106 +7,33 @@ Components are loaded dynamically from a heuristics Python file.
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import inspect
 import logging
+import math
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from openrlhf.reward.core import Aggregator, RewardComponent, load_heuristics, sanitize_extra_logs
 
 logger = logging.getLogger(__name__)
 
-Values = Dict[str, List[float]]
+
+def _json_safe_float_list(values: List[float]) -> List[Optional[float]]:
+    """Replace NaN/inf with None so FastAPI/JSON can serialize inactive heuristic slots."""
+    out: List[Optional[float]] = []
+    for v in values:
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            out.append(None)
+        else:
+            out.append(v)
+    return out
 
 
-class RewardComponent:
-    """
-    Return values.
-    values: dict[key -> list[float]] length N
-    """
-
-    def should_call(self, label: str) -> bool:
-        return True
-
-    def __call__(self, queries: List[str], prompts: List[str], labels: List[str]) -> Values:
-        raise NotImplementedError
-
-
-class NamedRewardComponent:
-    def __init__(self, name: str, component: RewardComponent):
-        self.name = name
-        self.component = component
-
-    def should_call(self, label: str) -> bool:
-        return self.component.should_call(label)
-
-    def __call__(self, queries: List[str], prompts: List[str], labels: List[str]) -> Values:
-        values = self.component(queries, prompts, labels)
-        if len(values) != 1:
-            raise ValueError(f"{self.name} must return exactly one reward key, got: {list(values.keys())}")
-        return {self.name: next(iter(values.values()))}
-
-
-class Aggregator:
-    """Score samples using component routing based on should_call.
-
-    ``components`` is a list of reward components.
-    """
-
-    def __init__(self, components: List[RewardComponent], device: torch.device):
-        self.components = components
-        self.device = device
-
-    @torch.no_grad()
-    def score(
-        self,
-        queries: List[str],
-        prompts: List[str],
-        labels: List[str],
-    ) -> Tuple[List[float], Dict[str, Any]]:
-        n = len(prompts)
-        # Values are Optional[float]; None means "heuristic not evaluated for this sample"
-        extra_logs: Dict[str, List[Optional[float]]] = {}
-
-        total_rewards = torch.zeros(n, device=self.device, dtype=torch.float32)
-
-        for comp in self.components:
-            # Find indices where comp.should_call is True
-            indices = [i for i, label in enumerate(labels) if comp.should_call(label)]
-            if not indices:
-                continue
-
-            sub_queries = [queries[i] for i in indices]
-            sub_prompts = [prompts[i] for i in indices]
-            sub_labels = [labels[i] for i in indices]
-            sub_n = len(indices)
-
-            vals = comp(sub_queries, sub_prompts, sub_labels)
-
-            for key, arr in vals.items():
-                if len(arr) != sub_n:
-                    raise ValueError(f"{key} len {len(arr)} != {sub_n}")
-
-                v = torch.tensor(arr, device=self.device, dtype=torch.float32)
-
-                # Scatter to total_rewards
-                idx_tensor = torch.tensor(indices, device=self.device, dtype=torch.long)
-                total_rewards.scatter_add_(0, idx_tensor, v)
-
-                # Initialise the column with None for every sample on first encounter
-                if key not in extra_logs:
-                    extra_logs[key] = [None] * n
-
-                # Scatter sub-batch results back to original positions
-                for j, idx in enumerate(indices):
-                    extra_logs[key][idx] = arr[j]
-
-        rewards = total_rewards.detach().cpu().tolist()
-        return rewards, extra_logs
+# CPUs the server process itself needs (uvicorn event loop + asyncio.to_thread workers).
+# runner.py reads this to include server overhead in the Slurm CPU allocation.
+SERVER_BASE_CPUS = 4
 
 
 class BatchEngine:
@@ -238,61 +165,14 @@ def create_app(
             # Compute rewards
             rewards, extra_logs = await engine.enqueue(queries, prompts, labels)
 
-            sanitized_extra_logs = {k: [v if v is not None else 0.0 for v in vals] for k, vals in extra_logs.items()}
-
-            for key in expected_log_keys:
-                if key not in sanitized_extra_logs:
-                    sanitized_extra_logs[key] = [0.0] * n
-
-            return JSONResponse({"rewards": rewards, "scores": rewards, "extra_logs": sanitized_extra_logs})
+            sanitized_extra_logs = sanitize_extra_logs(extra_logs, n, expected_log_keys)
+            json_extra_logs = {k: _json_safe_float_list(v) for k, v in sanitized_extra_logs.items()}
+            return JSONResponse({"rewards": rewards, "scores": rewards, "extra_logs": json_extra_logs})
         except Exception as e:
             logger.exception("Error in /get_reward")
             return JSONResponse({"error": str(e), "rewards": [], "scores": [], "extra_logs": {}}, status_code=500)
 
     return app
-
-
-def load_heuristics(heuristics_path: str, device: torch.device) -> Tuple[List[RewardComponent], List[str]]:
-    path = Path(heuristics_path).expanduser().resolve()
-    if not path.is_file():
-        raise ValueError(f"Heuristics file not found: {heuristics_path}")
-
-    spec = importlib.util.spec_from_file_location(f"_heuristics_{path.stem}", path)
-    if spec is None or spec.loader is None:
-        raise ValueError(f"Could not load heuristics file: {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    heuristic_classes = getattr(module, "HEURISTICS", None)
-    if not isinstance(heuristic_classes, list) or not heuristic_classes:
-        raise ValueError(f"{path} must define a non-empty HEURISTICS list")
-
-    components: List[RewardComponent] = []
-    expected_log_keys: List[str] = []
-    seen_names: set[str] = set()
-    for cls in heuristic_classes:
-        if not inspect.isclass(cls):
-            raise ValueError(f"HEURISTICS entries must be classes, got: {cls!r}")
-        if cls.__name__ in seen_names:
-            raise ValueError(f"Duplicate heuristic class name: {cls.__name__}")
-        seen_names.add(cls.__name__)
-
-        sig = inspect.signature(cls.__init__)
-        kwargs = {}
-        for name, param in list(sig.parameters.items())[1:]:
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                continue
-            if name == "device":
-                kwargs["device"] = device
-                continue
-            if param.default is inspect.Parameter.empty:
-                raise ValueError(f"{cls.__name__} requires unsupported init arg: {name}")
-
-        components.append(NamedRewardComponent(cls.__name__, cls(**kwargs)))
-        expected_log_keys.append(cls.__name__)
-
-    return components, expected_log_keys
 
 
 def main():

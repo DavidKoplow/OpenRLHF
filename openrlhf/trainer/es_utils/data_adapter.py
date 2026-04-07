@@ -41,12 +41,22 @@ def _summarize_metric_series(prefix: str, values: List[float]) -> Dict[str, floa
     if not values:
         return {}
     array = np.asarray(values, dtype=np.float64)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        # Heuristic inactive on every sample: log zeros so TensorBoard stays defined.
+        return {
+            f"{prefix}_mean": 0.0,
+            f"{prefix}_min": 0.0,
+            f"{prefix}_max": 0.0,
+            f"{prefix}_std": 0.0,
+            f"{prefix}_count": 0.0,
+        }
     return {
-        f"{prefix}_mean": float(array.mean()),
-        f"{prefix}_min": float(array.min()),
-        f"{prefix}_max": float(array.max()),
-        f"{prefix}_std": float(array.std()),
-        f"{prefix}_count": float(array.size),
+        f"{prefix}_mean": float(finite.mean()),
+        f"{prefix}_min": float(finite.min()),
+        f"{prefix}_max": float(finite.max()),
+        f"{prefix}_std": float(finite.std()),
+        f"{prefix}_count": float(finite.size),
     }
 
 

@@ -57,6 +57,7 @@ class ESTrainer:
 
         self.strategy = strategy
         self.args = strategy.args
+        # ES can now consume either a legacy reward model group or a Ray reward graph manager.
         self.reward_model_group = reward_model_group
         self.vllm_engines = vllm_engines
         self.actor_model_group = actor_model_group

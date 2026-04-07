@@ -147,7 +147,8 @@ class ESWorkerWrap(WorkerWrap):
             p.grad = (-g).to(p.dtype)
 
             if clip > 0:
-                torch.nn.utils.clip_grad_norm_([p], clip)
+                #NOTE: This is not equivalent to PyTorch's clip_grad_norm_(), though we can't do torcher's version since it would make this code too slow.
+                torch.nn.utils.clip_grad_norm_([p], clip) 
 
             optimizer.step()
             p.grad = None

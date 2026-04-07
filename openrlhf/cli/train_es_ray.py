@@ -13,6 +13,7 @@ import ray
 
 from openrlhf.trainer.es_trainer import ESTrainer
 from openrlhf.trainer.ray import create_vllm_engines
+from openrlhf.trainer.ray.reward_groups import build_reward_graph
 from openrlhf.utils import get_strategy
 
 
@@ -31,7 +32,10 @@ def train(args):
     strategy.print(f"ES Training with args: {args}")
 
     # Create vLLM engines with ES worker extension
-    max_len = args.max_len if args.max_len else args.prompt_max_len + args.generate_max_len
+    max_len = args.max_len
+
+    use_ray_reward_groups = bool(args.heuristics)
+    remote_rm_url = None if use_ray_reward_groups else args.remote_rm_url
 
     vllm_engines = create_vllm_engines(
         args.vllm_num_engines,
@@ -47,14 +51,22 @@ def train(args):
         args.vllm_enable_sleep,
         None,  # No logprobs_mode for ES
         agent_func_path=args.agent_func_path,
-        remote_rm_url=args.remote_rm_url,
+        remote_rm_url=remote_rm_url,
         worker_extension_cls="openrlhf.trainer.ray.es_worker_wrap.ESWorkerWrap",
         vllm_max_num_seqs=args.vllm_max_num_seqs,
     )
 
     actor_model_group = None
     critic_model_group = None
-    reward_model_group = None  # ES uses rewards from agent or response directly
+    reward_model_group = None
+    if use_ray_reward_groups:
+        reward_model_group = build_reward_graph(
+            args.heuristics,
+            heuristic_replicas=args.heuristic_num_replicas,
+            reward_num_nodes=args.reward_num_nodes,
+            reward_num_cpus_per_node=args.reward_num_cpus_per_node,
+            reward_num_gpus_per_node=args.reward_num_gpus_per_node,
+        )
     reference_model_group = None
 
     # Create ES trainer with all required parameters
@@ -68,6 +80,7 @@ def train(args):
         reference_model_group=reference_model_group,
         vllm_engines=vllm_engines,
         # Generation kwargs passed as **kwargs (see --stop_token, --skip_special_tokens, sampling args)
+        max_len=args.max_len,
         prompt_max_len=args.prompt_max_len,
         max_new_tokens=args.generate_max_len,
         temperature=args.temperature,
@@ -217,8 +230,8 @@ if __name__ == "__main__":
         default=None,
         help="Deprecated: use --batch_size (prompts per seed per ES step).",
     )
-    parser.add_argument("--prompt_max_len", type=int, default=1024)
-    parser.add_argument("--generate_max_len", type=int, default=1024)
+    parser.add_argument("--prompt_max_len", type=int, default=None)
+    parser.add_argument("--generate_max_len", type=int, default=None)
     parser.add_argument("--max_len", type=int, default=None)
     parser.add_argument("--n_samples_per_prompt", type=int, default=1)
     parser.add_argument("--top_p", type=float, default=1.0)
@@ -281,6 +294,31 @@ if __name__ == "__main__":
     )
     parser.add_argument("--remote_rm_url", type=str, default=None, help="Remote reward model URL")
     parser.add_argument("--agent_func_path", type=str, default=None, help="Agent script path for reward")
+    parser.add_argument("--heuristics", type=str, default=None, help="Path to a Python file defining HEURISTICS")
+    parser.add_argument(
+        "--heuristic_num_replicas",
+        type=int,
+        default=1,
+        help="Number of Ray worker replicas to launch per heuristic class.",
+    )
+    parser.add_argument(
+        "--reward_num_nodes",
+        type=int,
+        default=1,
+        help="Number of reward-head actors to launch for ES reward aggregation.",
+    )
+    parser.add_argument(
+        "--reward_num_cpus_per_node",
+        type=float,
+        default=1.0,
+        help="CPUs to allocate to each reward-head actor.",
+    )
+    parser.add_argument(
+        "--reward_num_gpus_per_node",
+        type=float,
+        default=0.0,
+        help="GPUs to allocate to each reward-head actor.",
+    )
 
     # ==================== Logging backends ====================
     parser.add_argument("--use_wandb", type=str, default=None)
@@ -372,6 +410,22 @@ if __name__ == "__main__":
         args.population_size = args.vllm_num_engines
 
     args.es_shared_batch = not args.unique_batch_per_seed
+
+    if args.heuristics and args.remote_rm_url:
+        parser.error("Cannot specify both --heuristics and --remote_rm_url")
+    if args.heuristics and args.agent_func_path:
+        parser.error("Cannot specify both --heuristics and --agent_func_path")
+    if args.heuristic_num_replicas < 1:
+        parser.error("--heuristic_num_replicas must be >= 1")
+    if args.reward_num_nodes < 1:
+        parser.error("--reward_num_nodes must be >= 1")
+    if args.reward_num_cpus_per_node < 0:
+        parser.error("--reward_num_cpus_per_node must be >= 0")
+    if args.reward_num_gpus_per_node < 0:
+        parser.error("--reward_num_gpus_per_node must be >= 0")
+
+    if args.max_len is None:
+        args.max_len = (args.prompt_max_len or 1024) + (args.generate_max_len or 1024)
 
     if args.agent_func_path:
         args.remote_rm_url = args.agent_func_path

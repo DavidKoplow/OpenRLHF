@@ -9,7 +9,6 @@ from vllm import SamplingParams
 
 from openrlhf.trainer.es_utils.data_adapter import EVAL_SEED, STABILIZE_SEED, ESExperience
 from openrlhf.trainer.ppo_utils.samples_generator import _collect_prompt_batch
-from openrlhf.trainer.ray.launcher import RayActorGroup
 from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 
 
@@ -23,7 +22,7 @@ class ESSamplesGenerator:
         eval_dataloader: DataLoader,
         tokenizer,
         vllm_engines: List,
-        reward_model_group: Optional[RayActorGroup] = None,
+        reward_model_group=None,
     ):
         self.strategy = strategy
         self.args = strategy.args
@@ -114,28 +113,27 @@ class ESSamplesGenerator:
             )
 
         all_experiences: List[ESExperience] = []
-        all_reward_jobs = []
         exhausted = False
         prompts_consumed = 0
+        reward_wait_tasks: List[asyncio.Task] = []
 
         for task in asyncio.as_completed(tasks):
             round_experiences, batch_exhausted, consumed, reward_jobs, is_eval = await task
             all_experiences.extend(round_experiences)
-            all_reward_jobs.extend(reward_jobs)
             if not is_eval:
                 prompts_consumed = consumed if shared_batch else prompts_consumed + consumed
                 exhausted |= batch_exhausted
+            for experiences, ref in reward_jobs:
+                reward_wait_tasks.append(asyncio.create_task(self._await_and_apply_rewards(experiences, ref)))
 
-        if all_reward_jobs:
-            coroutines = [asyncio.to_thread(ray.get, refs) for _, refs in all_reward_jobs]
-            reward_results = await asyncio.gather(*coroutines)
-            for (experiences, _), rewards_per_actor in zip(all_reward_jobs, reward_results):
-                flat_rewards = sum(rewards_per_actor, [])
-                for experience, reward in zip(experiences, flat_rewards):
-                    # RewardModelActor.forward returns Tensor(1,) for a single sequence
-                    experience.rewards = reward
+        if reward_wait_tasks:
+            await asyncio.gather(*reward_wait_tasks)
 
         return all_experiences, exhausted, prompts_consumed
+
+    async def _await_and_apply_rewards(self, experiences: List[ESExperience], ref) -> None:
+        reward_output = await asyncio.to_thread(ray.get, ref)
+        self._apply_reward_output(experiences, reward_output)
 
     async def _run_one_seed(
         self,
@@ -185,11 +183,10 @@ class ESSamplesGenerator:
 
         reward_jobs = []
         if self.reward_model_group is not None and round_experiences:
-            refs = self.reward_model_group.async_run_method_batch(
-                method_name="forward",
-                sequences=[experience.sequences for experience in round_experiences],
-                attention_mask=[experience.attention_mask for experience in round_experiences],
-                pad_sequence=[True] * len(round_experiences),
+            refs = self.reward_model_group.async_score(
+                queries=self._decode_queries(round_experiences),
+                prompts=[experience.prompts[0] if experience.prompts else "" for experience in round_experiences],
+                labels=[experience.labels[0] if experience.labels else "" for experience in round_experiences],
             )
             reward_jobs.append((round_experiences, refs))
 
@@ -238,17 +235,21 @@ class ESSamplesGenerator:
         if stop is None:
             token = generate_kwargs.get("stop_token")
             stop = [] if not token else [token]
+        pm = generate_kwargs.get("prompt_max_len")
+        mn = generate_kwargs.get("max_new_tokens")
+        budget = generate_kwargs.get("max_len") or 2048
+        unified = pm is None and mn is None
         sampling_params = SamplingParams(
             temperature=generate_kwargs.get("temperature", 1.0),
             top_p=generate_kwargs.get("top_p", 1.0),
             top_k=generate_kwargs.get("top_k", -1),
-            max_tokens=generate_kwargs.get("max_new_tokens", 1024),
+            max_tokens=None if unified else mn,
             min_tokens=generate_kwargs.get("min_new_tokens", 1),
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
             logprobs=None,
             stop=stop,
         )
-        truncate_length = generate_kwargs.get("prompt_max_len", 1024) + generate_kwargs.get("max_new_tokens", 1024)
+        truncate_length = budget
         n_samples = self.args.n_samples_per_prompt
 
         all_refs = []
@@ -283,6 +284,25 @@ class ESSamplesGenerator:
         pbar.close()
         return experiences
 
+    def _decode_queries(self, experiences: List[ESExperience]) -> List[str]:
+        queries = []
+        for experience in experiences:
+            token_ids = experience.sequences.squeeze(0).tolist()
+            queries.append(self.tokenizer.decode(token_ids, skip_special_tokens=False))
+        return queries
+
+    def _apply_reward_output(self, experiences: List[ESExperience], reward_output: Dict) -> None:
+        rewards = reward_output.get("rewards", [])
+        extra_logs = reward_output.get("extra_logs", {})
+        for idx, experience in enumerate(experiences):
+            if idx < len(rewards):
+                experience.rewards = torch.tensor([float(rewards[idx])], dtype=torch.float32)
+            for key, values in extra_logs.items():
+                if idx < len(values):
+                    v = values[idx]
+                    x = float("nan") if v is None else float(v)
+                    experience.info[key] = torch.tensor([x], dtype=torch.float32)
+
     def _process_response_into_experience(
         self,
         response: dict,
@@ -313,7 +333,8 @@ class ESSamplesGenerator:
         info = {}
         for key, value in (response.get("extra_logs") or {}).items():
             # agent.py normalises extra_log values to plain float scalars at the source
-            info[key] = torch.tensor([value], dtype=torch.float32)
+            x = float("nan") if value is None else float(value)
+            info[key] = torch.tensor([x], dtype=torch.float32)
 
         return ESExperience(
             sequences=sequences.unsqueeze(0),
@@ -350,17 +371,12 @@ class ESSamplesGenerator:
 
             experiences = self._dispatch_and_collect(prompts_per_engine, self.vllm_engines, **generate_kwargs)
             if self.reward_model_group is not None and experiences:
-                reward_refs = self.reward_model_group.async_run_method_batch(
-                    method_name="forward",
-                    sequences=[experience.sequences for experience in experiences],
-                    attention_mask=[experience.attention_mask for experience in experiences],
-                    pad_sequence=[True] * len(experiences),
+                reward_ref = self.reward_model_group.async_score(
+                    queries=self._decode_queries(experiences),
+                    prompts=[experience.prompts[0] if experience.prompts else "" for experience in experiences],
+                    labels=[experience.labels[0] if experience.labels else "" for experience in experiences],
                 )
-                rewards_results = ray.get(reward_refs)
-                flat_rewards = sum(rewards_results, [])
-                for experience, reward in zip(experiences, flat_rewards):
-                    # RewardModelActor.forward returns Tensor(1,) for a single sequence
-                    experience.rewards = reward
+                self._apply_reward_output(experiences, ray.get(reward_ref))
             return experiences
         finally:
             if self.args.vllm_enable_sleep:
