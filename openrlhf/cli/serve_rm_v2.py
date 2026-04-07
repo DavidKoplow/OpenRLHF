@@ -4,6 +4,7 @@ FastAPI reward server with batching and component aggregation.
 
 Components are loaded dynamically from a heuristics Python file.
 """
+
 from __future__ import annotations
 
 import asyncio

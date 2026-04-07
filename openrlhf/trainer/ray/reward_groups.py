@@ -28,7 +28,9 @@ class HeuristicWorkerActor:
         )
         self.name = heuristic_cls.__name__
 
-    def score_batch(self, queries: List[str], prompts: List[str], labels: List[str]) -> Dict[str, List[Optional[float]]]:
+    def score_batch(
+        self, queries: List[str], prompts: List[str], labels: List[str]
+    ) -> Dict[str, List[Optional[float]]]:
         batch_size = len(prompts)
         indices = [idx for idx, label in enumerate(labels) if self.component.should_call(label)]
         if not indices:
@@ -57,7 +59,9 @@ class HeuristicWorkerGroup:
         self.worker_actors = list(worker_actors)
         self._cursor = 0
 
-    def dispatch(self, queries: List[str], prompts: List[str], labels: List[str]) -> List[Tuple[int, int, ray.ObjectRef]]:
+    def dispatch(
+        self, queries: List[str], prompts: List[str], labels: List[str]
+    ) -> List[Tuple[int, int, ray.ObjectRef]]:
         batch_size = len(prompts)
         if batch_size == 0:
             return []
@@ -119,7 +123,9 @@ class RewardHeadActor:
         self.heuristic_groups = list(heuristic_groups)
         self.expected_log_keys = list(expected_log_keys)
 
-    def score(self, queries: List[str], prompts: List[str], labels: List[str]) -> Dict[str, List[float] | Dict[str, List[float]]]:
+    def score(
+        self, queries: List[str], prompts: List[str], labels: List[str]
+    ) -> Dict[str, List[float] | Dict[str, List[float]]]:
         batch_size = len(prompts)
         total_rewards = [0.0] * batch_size
         extra_logs: Dict[str, List[Optional[float]]] = {}

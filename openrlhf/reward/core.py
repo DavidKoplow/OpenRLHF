@@ -167,6 +167,8 @@ def load_heuristics(heuristics_path: str, device: torch.device) -> Tuple[List[Re
     components: List[RewardComponent] = []
     expected_log_keys: List[str] = []
     for heuristic_cls in load_heuristic_classes(heuristics_path):
-        components.append(NamedRewardComponent(heuristic_cls.__name__, instantiate_heuristic(heuristic_cls, device=device)))
+        components.append(
+            NamedRewardComponent(heuristic_cls.__name__, instantiate_heuristic(heuristic_cls, device=device))
+        )
         expected_log_keys.append(heuristic_cls.__name__)
     return components, expected_log_keys
